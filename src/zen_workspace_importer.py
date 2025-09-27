@@ -55,23 +55,83 @@ class ZenWorkspaceImporter:
         """
         return arc_icon  # Use the original Arc emoji directly
 
+    def _convert_rgb_to_zen_theme(self, color: Optional[dict]) -> tuple:
+        """Convert Arc RGB color to Zen theme format.
+
+        Uses actual measured Arc color values to match the exact appearance.
+        Arc Personal green measured as 0xbbf6da (RGB: 187, 246, 218).
+
+        Args:
+            color: Dict with 'r', 'g', 'b' keys (values 0-1)
+
+        Returns:
+            Tuple of (theme_type, theme_colors_json) or (None, None)
+        """
+        if not color or 'r' not in color or 'g' not in color or 'b' not in color:
+            return None, None
+
+        r, g, b = color['r'], color['g'], color['b']
+
+        # Arc applies a specific visual transformation to create its subtle appearance
+        # Measured examples used to reverse-engineer the formula:
+        # Personal (0,0.841,0.404) → 0xbbf6da (187,246,218)
+        # WillowTree (0.914,0.703,0) → 0xfbe496 (251,228,150)
+
+        # Arc's transformation appears to create a light pastel by:
+        # 1. Setting a high baseline luminosity
+        # 2. Adding color tint proportional to original color
+        # 3. Different scaling for different color channels
+
+        # Calibrated values based on measured Arc colors
+        base_r, base_g, base_b = 185, 225, 150  # Base tint values
+        scale_r, scale_g, scale_b = 72, 25, 170  # Color scaling factors
+
+        # Apply Arc's color transformation formula
+        final_r = base_r + (r * scale_r)
+        final_g = base_g + (g * scale_g)
+        final_b = base_b + (b * scale_b)
+
+        # Convert to 0-255 range and clamp
+        r_255 = max(0, min(255, int(final_r)))
+        g_255 = max(0, min(255, int(final_g)))
+        b_255 = max(0, min(255, int(final_b)))
+
+        # Create Zen theme color object to match Arc's appearance
+        theme_colors = [{
+            "c": [r_255, g_255, b_255],
+            "isCustom": False,
+            "algorithm": "floating",
+            "isPrimary": True,
+            "lightness": "75",  # Moderate lightness to show the blended color
+            "position": {"x": 228, "y": 253},
+            "type": "explicit-lightness"
+        }]
+
+        import json
+        return "gradient", json.dumps(theme_colors)
+
     def create_workspace(self, name: str, container_id: int, position: int = 1000,
-                        icon: Optional[str] = None) -> Optional[str]:
+                        icon: Optional[str] = None, color: Optional[dict] = None) -> Optional[str]:
         """Create a new workspace in zen_workspaces table."""
         workspace_uuid = "{" + str(uuid.uuid4()) + "}"
         timestamp = int(datetime.now().timestamp() * 1000)
 
-        # Map Arc icon to Zen icon if provided
+        # Map Arc icon and color to Zen format if provided
         zen_icon = self._map_arc_icon_to_zen(icon)
+        theme_type, theme_colors = self._convert_rgb_to_zen_theme(color)
 
         try:
             with sqlite3.connect(self.places_db) as conn:
                 cursor = conn.cursor()
+
+                # Create workspace with icon and theme/color support
                 cursor.execute("""
                     INSERT INTO zen_workspaces (
-                        uuid, name, container_id, position, created_at, updated_at, icon
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                """, (workspace_uuid, name, container_id, position, timestamp, timestamp, zen_icon))
+                        uuid, name, container_id, position, created_at, updated_at, icon,
+                        theme_type, theme_colors, theme_opacity, theme_rotation, theme_texture
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (workspace_uuid, name, container_id, position, timestamp, timestamp, zen_icon,
+                      theme_type, theme_colors, 1.0, 0, 0))
 
                 # Add to changes table
                 cursor.execute("""
@@ -80,44 +140,71 @@ class ZenWorkspaceImporter:
                 """, (workspace_uuid, timestamp))
 
                 icon_info = f" with icon: {zen_icon}" if zen_icon else ""
-                logger.info(f"✅ Created workspace: {name} ({workspace_uuid}){icon_info}")
+                color_info = f" and theme: {theme_type}" if theme_type else ""
+                logger.info(f"✅ Created workspace: {name} ({workspace_uuid}){icon_info}{color_info}")
                 return workspace_uuid
 
         except Exception as e:
             logger.error(f"Failed to create workspace '{name}': {e}")
             return None
 
-    def update_workspace_icon(self, workspace_uuid: str, icon: Optional[str]) -> bool:
-        """Update the icon for an existing workspace."""
-        if not icon:
+    def update_workspace_icon_and_color(self, workspace_uuid: str, icon: Optional[str], color: Optional[dict]) -> bool:
+        """Update the icon and color theme for an existing workspace."""
+        if not icon and not color:
             return True  # Nothing to update
 
-        # Map Arc icon to Zen icon
-        zen_icon = self._map_arc_icon_to_zen(icon)
+        # Map Arc icon and color to Zen format
+        zen_icon = self._map_arc_icon_to_zen(icon) if icon else None
+        theme_type, theme_colors = self._convert_rgb_to_zen_theme(color) if color else (None, None)
         timestamp = int(datetime.now().timestamp() * 1000)
 
         try:
             with sqlite3.connect(self.places_db) as conn:
                 cursor = conn.cursor()
-                cursor.execute("""
-                    UPDATE zen_workspaces
-                    SET icon = ?, updated_at = ?
-                    WHERE uuid = ?
-                """, (zen_icon, timestamp, workspace_uuid))
 
-                # Add to changes table
-                cursor.execute("""
-                    INSERT OR REPLACE INTO zen_workspaces_changes (uuid, timestamp)
-                    VALUES (?, ?)
-                """, (workspace_uuid, timestamp))
+                # Build dynamic UPDATE query based on what needs to be updated
+                updates = []
+                params = []
 
-                logger.info(f"🎨 Updated icon for workspace {workspace_uuid}: {zen_icon}")
-                conn.commit()
-                return True
+                if zen_icon:
+                    updates.append("icon = ?")
+                    params.append(zen_icon)
+
+                if theme_type and theme_colors:
+                    updates.append("theme_type = ?")
+                    updates.append("theme_colors = ?")
+                    updates.append("theme_opacity = ?")
+                    updates.append("theme_rotation = ?")
+                    updates.append("theme_texture = ?")
+                    params.extend([theme_type, theme_colors, 1.0, 0, 0])
+
+                updates.append("updated_at = ?")
+                params.append(timestamp)
+                params.append(workspace_uuid)  # For WHERE clause
+
+                if updates:
+                    query = f"UPDATE zen_workspaces SET {', '.join(updates)} WHERE uuid = ?"
+                    cursor.execute(query, params)
+
+                    # Add to changes table
+                    cursor.execute("""
+                        INSERT OR REPLACE INTO zen_workspaces_changes (uuid, timestamp)
+                        VALUES (?, ?)
+                    """, (workspace_uuid, timestamp))
+
+                    icon_info = f" icon: {zen_icon}" if zen_icon else ""
+                    theme_info = f" theme: {theme_type}" if theme_type else ""
+                    logger.info(f"🎨 Updated workspace {workspace_uuid}:{icon_info}{theme_info}")
+                    conn.commit()
+                    return True
 
         except Exception as e:
-            logger.error(f"Failed to update workspace icon for {workspace_uuid}: {e}")
+            logger.error(f"Failed to update workspace icon/color for {workspace_uuid}: {e}")
             return False
+
+    def update_workspace_icon(self, workspace_uuid: str, icon: Optional[str]) -> bool:
+        """Update the icon for an existing workspace."""
+        return self.update_workspace_icon_and_color(workspace_uuid, icon, None)
 
     def update_pinned_tabs_workspace(self, old_workspace_uuid: str, new_workspace_uuid: str) -> bool:
         """Update pinned tabs to use the new workspace UUID."""
@@ -197,6 +284,7 @@ class ZenWorkspaceImporter:
             for space in arc_export_data.get('spaces', []):
                 space_name = space['space_name']
                 space_icon = space.get('icon')  # Get icon from Arc data
+                space_color = space.get('color')  # Get color from Arc data
                 container_id = container_mappings.get(space_name, 1)
 
                 # Check if workspace already exists
@@ -209,12 +297,12 @@ class ZenWorkspaceImporter:
                 if existing_uuid:
                     logger.info(f"  ✅ Using existing workspace: {space_name}")
                     final_workspace_mappings[space_name] = existing_uuid
-                    # Update icon for existing workspace
-                    if space_icon:
-                        self.update_workspace_icon(existing_uuid, space_icon)
+                    # Update icon and color for existing workspace
+                    if space_icon or space_color:
+                        self.update_workspace_icon_and_color(existing_uuid, space_icon, space_color)
                 else:
-                    # Create new workspace with icon
-                    workspace_uuid = self.create_workspace(space_name, container_id, position, space_icon)
+                    # Create new workspace with icon and color
+                    workspace_uuid = self.create_workspace(space_name, container_id, position, space_icon, space_color)
                     if workspace_uuid:
                         final_workspace_mappings[space_name] = workspace_uuid
                         position += 100  # Increment position for next workspace

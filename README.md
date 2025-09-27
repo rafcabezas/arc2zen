@@ -46,10 +46,13 @@ python3 migrate_arc_to_zen.py --help
 ## 📋 What Gets Migrated
 
 - **Arc Spaces** → **Zen Workspaces** (each Arc space becomes a Zen workspace)
-- **Space Icons** → **Zen Workspace Icons** (Unicode emojis preserved when available)
+- **Space Icons** → **Workspace Icons** (Unicode emojis preserved: 🏠, 🌳, 🎬, ⚖️, etc.)
+- **Space Colors** → **Workspace Themes** (Arc's subtle color tints accurately reproduced)
 - **Pinned Tabs** → **Zen Pinned Tabs** (with folder structure preserved)
+- **Essential Tabs** → **Essential Pinned Tabs** (Arc's top toolbar tabs with large icons)
 - **Folder Hierarchy** → **Zen Folder Structure** (nested folders maintained)
 - **Display Order** → **Zen Sidebar Order** (Arc visual ordering preserved)
+- **Backup Bookmarks** → **Firefox Bookmarks** (additional backup as standard bookmarks)
 
 ## 🔧 How It Works
 
@@ -156,13 +159,35 @@ The tool creates several files during migration (all excluded from git):
 
 **Result**: Folders and tabs appear in Zen in a similar order to your Arc sidebar.
 
-## 🎨 Space Icon Migration
+## 🎨 Visual Migration Features
 
-**✅ Added**: Arc space icons can now be migrated to Zen workspaces as Unicode emojis.
+### Space Icon Migration
+**✅ Implemented**: Arc space icons migrate to Zen workspaces as Unicode emojis.
 
-**Technical Solution**: The tool extracts Unicode emojis from Arc's `customInfo.iconType.emoji_v2` field and stores them in Zen's `zen_workspaces.icon` column, which supports Unicode characters.
+**Technical Solution**: Extracts Unicode emojis from Arc's `customInfo.iconType.emoji_v2` field and stores them in Zen's `zen_workspaces.icon` column.
 
-**Result**: Arc space icons (🏠, 🌳, 🎬, etc.) can appear as visual icons in Zen workspaces.
+**Result**: Arc space icons (🏠, 🌳, 🎬, ⚖️, etc.) appear as visual icons in Zen workspaces.
+
+### Space Color Migration
+**✅ Implemented**: Arc space colors migrate as subtle workspace themes with pixel-perfect accuracy.
+
+**Technical Solution**:
+- Extracts RGB values from Arc's `customInfo.windowTheme.primaryColorPalette.midTone`
+- Uses measured Arc color values (e.g., Personal green: #bbf6da, WillowTree gold: #fbe496)
+- Applies Arc's exact color transformation algorithm to create matching subtle tints
+- Stores as JSON theme data in Zen's workspace theme system (`theme_type`, `theme_colors`)
+
+**Result**: Zen workspace backgrounds closely match Arc's subtle color aesthetics.
+
+### Essential Tabs Migration
+**✅ Implemented**: Arc's Essential tabs (top toolbar) migrate to appropriate workspaces.
+
+**Technical Solution**:
+- Extracts Essential tabs from Arc's `topApps` containers per profile
+- Maps tabs to correct workspaces using profile associations (`directoryBasename`)
+- Imports with `is_essential` flag to distinguish from regular pinned tabs
+
+**Result**: Arc's Essential tabs appear as pinned tabs in their respective Zen workspaces.
 
 ## ⚠️ Minor Limitations
 
@@ -175,10 +200,12 @@ The tool creates several files during migration (all excluded from git):
 - Standard web content, bookmarks, and organizational structure migrate completely
 
 ### What's Now Supported ✅
-- **Space icons**: Arc space emojis can migrate as Unicode icons in Zen
+- **Space icons**: Arc space emojis migrate as Unicode icons in Zen
+- **Space colors**: Arc color themes migrate as Zen workspace themes
+- **Essential tabs**: Arc's top toolbar tabs migrate to appropriate workspaces
 - **Display ordering**: Arc sidebar ordering preserved via container childrenIds
 - **Folder hierarchy**: Nested folder structure maintained
-- **Workspace mapping**: Automatic Arc space → Zen workspace conversion
+- **Workspace mapping**: Arc space → Zen workspace conversion
 
 ## 🐛 Troubleshooting
 

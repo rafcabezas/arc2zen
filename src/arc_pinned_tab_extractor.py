@@ -52,6 +52,7 @@ class ArcSpace:
     pinned_tabs: List[ArcPinnedTab]
     folders: List[ArcFolder]
     icon: Optional[str] = None  # Emoji icon from Arc space
+    color: Optional[dict] = None  # RGB color from Arc space theme
 
     def __str__(self):
         icon_str = f" ({self.icon})" if self.icon else ""
@@ -117,10 +118,27 @@ class ArcPinnedTabExtractor:
                 if profile is None and space_name == "Personal":
                     profile = "Default"
 
+                # Extract color from windowTheme if available
+                color = None
+                window_theme = custom_info.get('windowTheme', {})
+                if window_theme:
+                    primary_palette = window_theme.get('primaryColorPalette', {})
+                    if primary_palette:
+                        # Use midTone as the main color representation
+                        mid_tone = primary_palette.get('midTone', {})
+                        if mid_tone and 'red' in mid_tone and 'green' in mid_tone and 'blue' in mid_tone:
+                            # Extract RGB values (Arc uses extended sRGB with values that can be negative)
+                            r = max(0, min(1, mid_tone['red']))  # Clamp to 0-1 range
+                            g = max(0, min(1, mid_tone['green']))
+                            b = max(0, min(1, mid_tone['blue']))
+                            color = {'r': r, 'g': g, 'b': b}
+                            logger.info(f"  🎨 Found color for {space_name}: RGB({r:.3f}, {g:.3f}, {b:.3f})")
+
                 spaces_info[space_id] = {
                     'name': space_name,
                     'icon': icon,
-                    'profile': profile
+                    'profile': profile,
+                    'color': color
                 }
                 i += 2
             else:
@@ -287,7 +305,8 @@ class ArcPinnedTabExtractor:
 
                         if pinned_tabs or folders:
                             logger.info(f"  ✅ {space_name}: {len(pinned_tabs)} pinned tabs, {len(folders)} folders")
-                            arc_spaces.append(ArcSpace(space_id, space_name, pinned_tabs, folders, space_icon))
+                            space_color = space_info.get('color')
+                            arc_spaces.append(ArcSpace(space_id, space_name, pinned_tabs, folders, space_icon, space_color))
             else:
                 # Fallback to original method if sidebar spaces not found
                 for space_id, space_info in spaces_info.items():
@@ -301,7 +320,8 @@ class ArcPinnedTabExtractor:
                         pinned_tabs.sort(key=lambda tab: tab.index)
                         folders.sort(key=lambda folder: folder.index)
                         logger.info(f"  ✅ {space_name}: {len(pinned_tabs)} pinned tabs, {len(folders)} folders")
-                        arc_spaces.append(ArcSpace(space_id, space_name, pinned_tabs, folders, space_icon))
+                        space_color = space_info.get('color')
+                        arc_spaces.append(ArcSpace(space_id, space_name, pinned_tabs, folders, space_icon, space_color))
 
         # Extract Essential tabs and distribute them to their appropriate workspaces
         essential_tabs_by_space = self._extract_essential_tabs_distributed(data, spaces_info)
@@ -680,9 +700,7 @@ class ArcPinnedTabExtractor:
                     folders.append(folder)
 
         logger.info(f"  ✅ {space_name}: {len(pinned_tabs)} pinned tabs, {len(folders)} folders")
-        # Get the space icon from spaces_info
-        space_icon = spaces_info.get(space_id, {}).get('icon')
-        return ArcSpace(space_id, space_name, pinned_tabs, folders, space_icon)
+        return ArcSpace(space_id, space_name, pinned_tabs, folders, None, None)
 
     def _is_in_pinned_container(self, item_id: str, pinned_container_id: str, items_lookup: Dict) -> bool:
         """Check if an item is within the pinned container hierarchy."""
@@ -730,6 +748,7 @@ class ArcPinnedTabExtractor:
                     'space_id': space.space_id,
                     'space_name': space.space_name,
                     'icon': space.icon,
+                    'color': space.color,
                     'total_pinned_tabs': len(space.pinned_tabs),
                     'total_folders': len(space.folders),
                     'pinned_tabs': [tab.to_dict() for tab in space.pinned_tabs],
