@@ -374,6 +374,9 @@ class ZenPinnedTabImporter:
                     # Since tabs are already sorted by Arc index, enumerate maintains order
                     position = base_position + i
 
+                    # Check if this is an Essential tab (from Arc's top toolbar)
+                    is_essential = tab_data.get('is_essential', False)
+
                     tab = ZenPinnedTab(
                         uuid="{" + str(uuid.uuid4()) + "}",
                         title=tab_data['title'],
@@ -381,6 +384,7 @@ class ZenPinnedTabImporter:
                         container_id=container_id,
                         workspace_uuid=workspace_uuid,
                         position=position,
+                        is_essential=is_essential,
                         parent_uuid=parent_uuid
                     )
 

@@ -28,6 +28,7 @@ class ArcPinnedTab:
     tab_id: str
     parent_id: str
     index: int  # Original position in Arc sidebar
+    is_essential: bool = False  # True if this was an Essential tab in Arc
 
     def to_dict(self) -> Dict:
         """Convert to dictionary for serialization."""
@@ -105,9 +106,21 @@ class ArcPinnedTabExtractor:
                     icon = icon_type['emoji_v2']
                     logger.info(f"  🎨 Found icon for {space_name}: {icon}")
 
+                # Extract profile information for Essential tabs mapping
+                profile = None
+                profile_data = space_data.get('profile', {})
+                if 'custom' in profile_data and '_0' in profile_data['custom']:
+                    custom_data = profile_data['custom']['_0']
+                    profile = custom_data.get('directoryBasename')
+
+                # If no profile is set (Personal space), map to "Default" profile
+                if profile is None and space_name == "Personal":
+                    profile = "Default"
+
                 spaces_info[space_id] = {
                     'name': space_name,
-                    'icon': icon
+                    'icon': icon,
+                    'profile': profile
                 }
                 i += 2
             else:
@@ -290,8 +303,125 @@ class ArcPinnedTabExtractor:
                         logger.info(f"  ✅ {space_name}: {len(pinned_tabs)} pinned tabs, {len(folders)} folders")
                         arc_spaces.append(ArcSpace(space_id, space_name, pinned_tabs, folders, space_icon))
 
+        # Extract Essential tabs and distribute them to their appropriate workspaces
+        essential_tabs_by_space = self._extract_essential_tabs_distributed(data, spaces_info)
+        if essential_tabs_by_space:
+            total_essential_tabs = sum(len(tabs) for tabs in essential_tabs_by_space.values())
+            logger.info(f"  🌟 Found {total_essential_tabs} Essential tabs distributed across workspaces")
+
+            # Add Essential tabs to their corresponding spaces
+            for space in arc_spaces:
+                if space.space_id in essential_tabs_by_space:
+                    essential_tabs = essential_tabs_by_space[space.space_id]
+                    space.pinned_tabs.extend(essential_tabs)
+                    logger.info(f"    ⭐ Added {len(essential_tabs)} Essential tabs to {space.space_name}")
+
+            # Handle orphaned Essential tabs by dropping them (from inactive profiles)
+            if "orphaned" in essential_tabs_by_space:
+                orphaned_tabs = essential_tabs_by_space["orphaned"]
+                if orphaned_tabs:
+                    logger.info(f"  📦 Found {len(orphaned_tabs)} orphaned Essential tabs from inactive profiles")
+                    logger.info(f"    📦 Dropping {len(orphaned_tabs)} orphaned Essential tabs (no matching active workspace)")
+
         logger.info(f"Found {len(arc_spaces)} spaces with pinned tabs")
         return arc_spaces
+
+    def _extract_essential_tabs_distributed(self, data: Dict, spaces_info: Dict) -> Dict[str, List[ArcPinnedTab]]:
+        """Extract Essential tabs from topApps containers and distribute them to appropriate spaces.
+
+        Essential tabs in Arc appear at the top with large icons and are stored
+        in containers with containerType.topApps rather than spaceItems.
+
+        Returns a dictionary mapping space_id -> list of Essential tabs for that space.
+        Orphaned tabs (no matching space) are stored under the "orphaned" key.
+        """
+        essential_tabs_by_space = {}
+
+        # Get all items from local sidebar
+        containers = data.get('sidebar', {}).get('containers', [])
+        if len(containers) <= 1 or 'items' not in containers[1]:
+            return essential_tabs_by_space
+
+        items = containers[1]['items']
+
+        # Build items lookup (items is stored as alternating id/data pairs)
+        items_lookup = {}
+        i = 0
+        while i < len(items):
+            if isinstance(items[i], str) and i + 1 < len(items):
+                item_id = items[i]
+                item_data = items[i + 1]
+                items_lookup[item_id] = item_data
+                i += 2
+            else:
+                i += 1
+
+        # Create profile-to-space mapping for quick lookup
+        profile_to_space = {}
+        for space_id, space_info in spaces_info.items():
+            profile = space_info.get('profile')
+            if profile:
+                profile_to_space[profile] = space_id
+
+        # Look for topApps containers and map them to spaces
+        for item_id, item_data in items_lookup.items():
+            container_type = item_data.get('data', {}).get('itemContainer', {}).get('containerType', {})
+
+            # Check if this is a topApps container
+            if 'topApps' in container_type:
+                logger.info(f"  🔍 Found topApps container: {item_id}")
+
+                # Extract profile information from topApps container
+                topapps_data = container_type['topApps']['_0']
+                directory_basename = None
+
+                if 'custom' in topapps_data and '_0' in topapps_data['custom']:
+                    custom_data = topapps_data['custom']['_0']
+                    directory_basename = custom_data.get('directoryBasename')
+                elif 'default' in topapps_data:
+                    directory_basename = "Default"
+
+                # Find the corresponding space for this profile
+                target_space_id = profile_to_space.get(directory_basename, "orphaned")
+                target_space_name = spaces_info.get(target_space_id, {}).get('name', 'Essential')
+
+                # Get the children IDs for this topApps container
+                children_ids = item_data.get('childrenIds', [])
+
+                # Process each Essential tab in this container
+                for idx, tab_id in enumerate(children_ids):
+                    tab_data = items_lookup.get(tab_id, {})
+                    tab_info = tab_data.get('data', {}).get('tab', {})
+
+                    if tab_info and tab_info.get('savedURL'):
+                        # Extract tab information
+                        url = tab_info.get('savedURL', '')
+                        title = tab_info.get('savedTitle', url)
+
+                        # Create ArcPinnedTab for Essential tab
+                        essential_tab = ArcPinnedTab(
+                            url=url,
+                            title=title,
+                            space_id=target_space_id,
+                            space_name=target_space_name,
+                            folder_path=[],  # Essential tabs go to root of workspace
+                            tab_id=tab_id,
+                            parent_id=item_id,  # Parent is the topApps container
+                            index=idx,
+                            is_essential=True  # Mark as Essential tab
+                        )
+
+                        # Add to the appropriate space
+                        if target_space_id not in essential_tabs_by_space:
+                            essential_tabs_by_space[target_space_id] = []
+                        essential_tabs_by_space[target_space_id].append(essential_tab)
+
+                        if target_space_id == "orphaned":
+                            logger.info(f"    📦 Orphaned Essential tab: {title} (Profile: {directory_basename})")
+                        else:
+                            logger.info(f"    ⭐ Essential tab for {target_space_name}: {title}")
+
+        return essential_tabs_by_space
 
     def _item_belongs_to_space(self, item_id: str, target_space_id: str, items_lookup: Dict, data: Dict) -> bool:
         """Check if an item belongs to a specific space."""
