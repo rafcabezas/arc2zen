@@ -32,6 +32,7 @@ class ZenPinnedTab:
     edited_title: bool = False
     is_folder_collapsed: bool = False
     folder_icon: Optional[str] = None
+    arc_tab_id: Optional[str] = None  # Track Arc's original tab ID
 
 @dataclass
 class ZenFolder:
@@ -51,6 +52,28 @@ class ZenPinnedTabImporter:
     def __init__(self, zen_profile_path: Path):
         self.zen_profile = zen_profile_path
         self.places_db = zen_profile_path / "places.sqlite"
+        self._ensure_arc_tab_id_column()
+        # Track tabs imported in current session to prevent duplicates
+        self.imported_in_session = set()  # Store (arc_tab_id, title, url) tuples
+
+    def _ensure_arc_tab_id_column(self):
+        """Ensure the arc_tab_id column exists in zen_pins table."""
+        try:
+            with sqlite3.connect(self.places_db) as conn:
+                cursor = conn.cursor()
+
+                # Check if arc_tab_id column exists
+                cursor.execute("PRAGMA table_info(zen_pins)")
+                columns = [row[1] for row in cursor.fetchall()]
+
+                if 'arc_tab_id' not in columns:
+                    # Add the arc_tab_id column
+                    cursor.execute("ALTER TABLE zen_pins ADD COLUMN arc_tab_id TEXT")
+                    conn.commit()
+                    logger.info("Added arc_tab_id column to zen_pins table")
+
+        except Exception as e:
+            logger.warning(f"Could not ensure arc_tab_id column exists: {e}")
 
     def get_workspace_uuids(self) -> Dict[int, str]:
         """Get workspace UUIDs for each container from existing pinned tabs."""
@@ -104,6 +127,24 @@ class ZenPinnedTabImporter:
     def create_folder(self, title: str, container_id: int, workspace_uuid: str,
                      position: int, parent_uuid: Optional[str] = None) -> str:
         """Create a folder in zen_pins and return its UUID."""
+
+        # Check if folder already exists to prevent duplicates
+        try:
+            with sqlite3.connect(self.places_db) as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT uuid FROM zen_pins
+                    WHERE title = ? AND container_id = ? AND is_group = 1 AND folder_parent_uuid IS ?
+                """, (title, container_id, parent_uuid))
+
+                existing = cursor.fetchone()
+                if existing:
+                    logger.info(f"    📁 Folder '{title}' already exists, reusing")
+                    return existing[0]
+
+        except Exception as e:
+            logger.warning(f"Failed to check for existing folder: {e}")
+
         folder_uuid = "{" + str(uuid.uuid4()) + "}"
         timestamp = int(datetime.now().timestamp() * 1000)
 
@@ -132,25 +173,55 @@ class ZenPinnedTabImporter:
             logger.error(f"Failed to create folder '{title}': {e}")
             return ""
 
-    def tab_exists(self, title: str, url: str, workspace_uuid: str, is_essential: bool = False) -> bool:
-        """Check if a tab already exists to prevent duplicates."""
+    def tab_exists(self, arc_tab_id: str, title: str, url: str) -> bool:
+        """Check if a tab already exists to prevent duplicates from multiple script runs."""
+        # First check session cache for tabs imported in current run
+        session_key = (arc_tab_id, title, url)
+        if session_key in self.imported_in_session:
+            return True
+
         try:
             with sqlite3.connect(self.places_db) as conn:
                 cursor = conn.cursor()
 
-                if is_essential:
-                    # For essential tabs: allow duplicates since Arc can have multiple
-                    # essential tabs with the same URL in the toolbar
-                    return False
-                else:
-                    # For regular tabs: check by title, URL, and workspace to prevent duplicates
+                if arc_tab_id:
+                    # If we have Arc tab ID, first try precise duplicate detection
                     cursor.execute("""
                         SELECT COUNT(*) FROM zen_pins
-                        WHERE title = ? AND url = ? AND workspace_uuid = ? AND is_essential = 0
-                    """, (title, url, workspace_uuid))
+                        WHERE arc_tab_id = ?
+                    """, (arc_tab_id,))
 
-                result = cursor.fetchone()
-                return result[0] > 0
+                    result = cursor.fetchone()
+                    arc_id_count = result[0]
+
+                    # If Arc tab ID found exact matches, return True immediately
+                    if arc_id_count > 0:
+                        return True
+
+                    # Arc tab ID found no matches, fall back to title+URL detection
+                    # This catches legacy tabs imported without Arc tab IDs
+                    cursor.execute("""
+                        SELECT COUNT(*) FROM zen_pins
+                        WHERE title = ? AND url = ?
+                    """, (title, url))
+
+                    result = cursor.fetchone()
+                    title_url_count = result[0]
+
+                    return title_url_count > 0
+
+                else:
+                    # Fallback for tabs without Arc tab ID: check by title and URL globally
+                    cursor.execute("""
+                        SELECT COUNT(*) FROM zen_pins
+                        WHERE title = ? AND url = ?
+                    """, (title, url))
+
+                    result = cursor.fetchone()
+                    count = result[0]
+
+
+                    return count > 0
 
         except Exception as e:
             logger.error(f"Failed to check if tab exists: {e}")
@@ -158,8 +229,11 @@ class ZenPinnedTabImporter:
 
     def create_pinned_tab(self, tab: ZenPinnedTab) -> bool:
         """Create a pinned tab in zen_pins."""
-        # Check if tab already exists to prevent duplicates
-        if self.tab_exists(tab.title, tab.url, tab.workspace_uuid, tab.is_essential):
+
+        # Check if tab already exists to prevent duplicates from multiple script runs
+        exists = self.tab_exists(tab.arc_tab_id, tab.title, tab.url)
+
+        if exists:
             logger.info(f"    ⚠️ Skipping duplicate tab: {tab.title}")
             return False
 
@@ -168,21 +242,26 @@ class ZenPinnedTabImporter:
         try:
             with sqlite3.connect(self.places_db) as conn:
                 cursor = conn.cursor()
+
                 cursor.execute("""
                     INSERT INTO zen_pins (
                         uuid, title, url, container_id, workspace_uuid, position,
                         is_essential, is_group, folder_parent_uuid, created_at, updated_at,
-                        edited_title, is_folder_collapsed, folder_icon
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, 0, NULL)
+                        edited_title, is_folder_collapsed, folder_icon, arc_tab_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, 0, NULL, ?)
                 """, (tab.uuid, tab.title, tab.url, tab.container_id, tab.workspace_uuid,
                       tab.position, int(tab.is_essential), tab.parent_uuid,
-                      timestamp, timestamp, int(tab.edited_title)))
+                      timestamp, timestamp, int(tab.edited_title), tab.arc_tab_id))
 
                 # Add to changes table
                 cursor.execute("""
                     INSERT OR REPLACE INTO zen_pins_changes (uuid, timestamp)
                     VALUES (?, ?)
                 """, (tab.uuid, timestamp))
+
+                # Add to session cache to prevent duplicates within the same run
+                session_key = (tab.arc_tab_id, tab.title, tab.url)
+                self.imported_in_session.add(session_key)
 
                 conn.commit()
                 return True
@@ -369,6 +448,7 @@ class ZenPinnedTabImporter:
 
                 logger.info(f"  📁 Processing {space_name}: {len(pinned_tabs)} tabs, {len(folders)} folders (preserving Arc sidebar order)")
 
+
                 if dry_run:
                     total_tabs += len(pinned_tabs)
                     total_folders += len(folders)
@@ -406,6 +486,7 @@ class ZenPinnedTabImporter:
                     # Check if this is an Essential tab (from Arc's top toolbar)
                     is_essential = tab_data.get('is_essential', False)
 
+                    arc_tab_id = tab_data.get('tab_id')
                     tab = ZenPinnedTab(
                         uuid="{" + str(uuid.uuid4()) + "}",
                         title=tab_data['title'],
@@ -414,13 +495,19 @@ class ZenPinnedTabImporter:
                         workspace_uuid=workspace_uuid,
                         position=position,
                         is_essential=is_essential,
-                        parent_uuid=parent_uuid
+                        parent_uuid=parent_uuid,
+                        arc_tab_id=arc_tab_id
                     )
+
 
                     if self.create_pinned_tab(tab):
                         total_tabs += 1
 
-                logger.info(f"    ✅ Imported {len(pinned_tabs)} pinned tabs")
+                skipped_count = len(pinned_tabs) - total_tabs
+                if skipped_count > 0:
+                    logger.info(f"    ✅ Imported {total_tabs} pinned tabs ({skipped_count} skipped as duplicates)")
+                else:
+                    logger.info(f"    ✅ Imported {total_tabs} pinned tabs")
 
             if dry_run:
                 logger.info(f"🧪 Would import {total_tabs} pinned tabs and create {total_folders} folders")

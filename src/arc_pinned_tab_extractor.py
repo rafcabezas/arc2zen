@@ -401,12 +401,20 @@ class ArcPinnedTabExtractor:
                 elif 'default' in topapps_data:
                     directory_basename = "Default"
 
+                # Get the children IDs for this topApps container first
+                children_ids = item_data.get('childrenIds', [])
+
                 # Find the corresponding space for this profile
                 target_space_id = profile_to_space.get(directory_basename, "orphaned")
-                target_space_name = spaces_info.get(target_space_id, {}).get('name', 'Essential')
 
-                # Get the children IDs for this topApps container
-                children_ids = item_data.get('childrenIds', [])
+                # Debug: Show profile matching results
+                if target_space_id == "orphaned":
+                    logger.info(f"    📝 Profile '{directory_basename}' not found in profile_to_space mapping - trying intelligent assignment")
+                    target_space_id = self._assign_essential_tab_to_space(children_ids, items_lookup, spaces_info)
+                else:
+                    logger.info(f"    ✅ Profile '{directory_basename}' matched to space '{spaces_info.get(target_space_id, {}).get('name', target_space_id)}'")
+
+                target_space_name = spaces_info.get(target_space_id, {}).get('name', 'Essential')
 
                 # Process each Essential tab in this container
                 for idx, tab_id in enumerate(children_ids):
@@ -442,6 +450,90 @@ class ArcPinnedTabExtractor:
                             logger.info(f"    ⭐ Essential tab for {target_space_name}: {title}")
 
         return essential_tabs_by_space
+
+    def _assign_essential_tab_to_space(self, children_ids: List[str], items_lookup: Dict, spaces_info: Dict) -> str:
+        """Intelligently assign orphaned essential tabs to spaces based on URL patterns and content."""
+
+        if not children_ids:
+            return "orphaned"
+
+        # Analyze URLs in the essential tabs to find patterns
+        tab_urls = []
+        tab_titles = []
+        debug_content = []
+
+        for tab_id in children_ids:
+            tab_data = items_lookup.get(tab_id, {})
+            tab_info = tab_data.get('data', {}).get('tab', {})
+
+            if tab_info:
+                url = tab_info.get('savedURL', '')
+                title = tab_info.get('savedTitle', '')
+                if url:
+                    tab_urls.append(url.lower())
+                    debug_content.append(f"URL: {url}")
+                if title:
+                    tab_titles.append(title.lower())
+                    debug_content.append(f"Title: {title}")
+
+        # Debug: Show what content we're analyzing
+        logger.info(f"    🔍 Analyzing orphaned essential tabs content:")
+        for content in debug_content[:5]:  # Show first 5 entries
+            logger.info(f"      - {content}")
+        if len(debug_content) > 5:
+            logger.info(f"      - ... and {len(debug_content) - 5} more")
+
+        # Check for space-specific patterns with more conservative matching
+        # Count matches for each space to find the best fit
+        space_scores = {}
+
+        for space_id, space_info in spaces_info.items():
+            space_name = space_info['name'].lower()
+            score = 0
+
+            # Special patterns for known spaces with higher confidence
+            if space_name == 'remoterlabs':
+                remoter_patterns = ['@remoterlabs.com', 'github.com/remoterlabs', 'remoterlabs/']
+                for pattern in remoter_patterns:
+                    score += sum(1 for content in tab_urls + tab_titles if pattern in content) * 3
+                # Lower weight for general 'remoter' matches
+                score += sum(1 for content in tab_urls + tab_titles if 'remoterlabs' in content and '@remoterlabs.com' not in content)
+
+            elif space_name == 'gavelmatch.com':
+                gavel_patterns = ['gavelmatch.com', 'gavelmatch.lovable.com']
+                for pattern in gavel_patterns:
+                    score += sum(1 for content in tab_urls + tab_titles if pattern in content) * 3
+                # Lower weight for general lovable matches
+                score += sum(1 for content in tab_urls + tab_titles if 'gavelmatch' in content and 'gavelmatch.com' not in content)
+
+            elif space_name == 'willowtree':
+                # Be very conservative with WillowTree - only assign from legitimate containers
+                # Don't do intelligent assignment for WillowTree to avoid cross-profile contamination
+                score = 0  # Disable intelligent assignment for WillowTree entirely
+
+            else:
+                # For other spaces, use exact space name matching in URLs (not titles to avoid false positives)
+                score += sum(1 for url in tab_urls if space_name in url)
+
+            if score > 0:
+                space_scores[space_id] = score
+
+        # Return the space with the highest score, but only if it's a strong match
+        if space_scores:
+            best_space_id = max(space_scores.keys(), key=lambda s: space_scores[s])
+            best_score = space_scores[best_space_id]
+            best_space_name = spaces_info[best_space_id]['name']
+
+            # Be much more conservative - only assign if there's a very strong, unambiguous match
+            # Require a minimum score of 4 to avoid false positives from cross-profile contamination
+            if best_score >= 4:
+                logger.info(f"    🎯 Assigning essential tabs to '{best_space_name}' (strong match, score: {best_score})")
+                return best_space_id
+            else:
+                logger.info(f"    🔒 Score {best_score} too low for '{best_space_name}' - keeping orphaned to avoid cross-profile contamination")
+
+        # No intelligent match found
+        return "orphaned"
 
     def _item_belongs_to_space(self, item_id: str, target_space_id: str, items_lookup: Dict, data: Dict) -> bool:
         """Check if an item belongs to a specific space."""
