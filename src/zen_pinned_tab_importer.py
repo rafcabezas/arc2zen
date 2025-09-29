@@ -132,8 +132,37 @@ class ZenPinnedTabImporter:
             logger.error(f"Failed to create folder '{title}': {e}")
             return ""
 
+    def tab_exists(self, title: str, url: str, workspace_uuid: str, is_essential: bool = False) -> bool:
+        """Check if a tab already exists to prevent duplicates."""
+        try:
+            with sqlite3.connect(self.places_db) as conn:
+                cursor = conn.cursor()
+
+                if is_essential:
+                    # For essential tabs: allow duplicates since Arc can have multiple
+                    # essential tabs with the same URL in the toolbar
+                    return False
+                else:
+                    # For regular tabs: check by title, URL, and workspace to prevent duplicates
+                    cursor.execute("""
+                        SELECT COUNT(*) FROM zen_pins
+                        WHERE title = ? AND url = ? AND workspace_uuid = ? AND is_essential = 0
+                    """, (title, url, workspace_uuid))
+
+                result = cursor.fetchone()
+                return result[0] > 0
+
+        except Exception as e:
+            logger.error(f"Failed to check if tab exists: {e}")
+            return False
+
     def create_pinned_tab(self, tab: ZenPinnedTab) -> bool:
         """Create a pinned tab in zen_pins."""
+        # Check if tab already exists to prevent duplicates
+        if self.tab_exists(tab.title, tab.url, tab.workspace_uuid, tab.is_essential):
+            logger.info(f"    ⚠️ Skipping duplicate tab: {tab.title}")
+            return False
+
         timestamp = int(datetime.now().timestamp() * 1000)
 
         try:

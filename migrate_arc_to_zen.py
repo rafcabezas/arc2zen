@@ -11,6 +11,7 @@ Usage:
 
 import argparse
 import json
+import subprocess
 import sys
 from pathlib import Path
 from typing import Optional
@@ -44,14 +45,73 @@ class Arc2ZenMigrator:
         self.home_dir = Path.home()
         self.temp_export_file = Path("arc_pinned_tabs_export.json")
 
+    def check_browsers_running(self) -> tuple[list[str], bool]:
+        """Check if Arc or Zen browsers are currently running.
+
+        Returns:
+            tuple: (list of running browsers, any_running)
+        """
+        running_browsers = []
+
+        try:
+            # Check for actual Arc browser processes (be specific to avoid false positives)
+            result = subprocess.run(
+                ['pgrep', '-f', '/Applications/Arc.app'],
+                capture_output=True,
+                text=True
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                running_browsers.append('Arc')
+
+            # Check for Zen browser processes (multiple possible locations)
+            zen_paths = [
+                '/Applications/Zen Browser.app',
+                '/Applications/zen.app',
+                '/usr/local/bin/zen',
+                'zen-browser'  # For AppImage/Flatpak installations
+            ]
+
+            for zen_path in zen_paths:
+                result = subprocess.run(
+                    ['pgrep', '-f', zen_path],
+                    capture_output=True,
+                    text=True
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    if 'Zen' not in running_browsers:
+                        running_browsers.append('Zen')
+                    break
+
+        except Exception as e:
+            logger.warning(f"Could not check if browsers are running: {e}")
+
+        return running_browsers, len(running_browsers) > 0
+
     def run_migration(self, dry_run: bool = False, zen_profile_name: Optional[str] = None) -> bool:
         """Run the complete Arc to Zen migration process."""
 
-        print("🔄 Arc to Zen Browser Migration")
+        print("🔄 Arc to Zen Browser Migration v1.2 (2025-09-29)")
         print("=" * 50)
 
         logger.info("Starting Arc to Zen migration")
         logger.info(f"Options: dry_run={dry_run}, zen_profile={zen_profile_name}")
+
+        # Clean up any previous export file to prevent caching issues
+        if self.temp_export_file.exists():
+            self.temp_export_file.unlink()
+            logger.info("🧹 Removed previous export file")
+
+        # Check if Arc or Zen browsers are running (required for reliable migration)
+        running_browsers, any_running = self.check_browsers_running()
+        if any_running:
+            browsers_list = " and ".join(running_browsers)
+            print(f"❌ ERROR: {browsers_list} browser{'s' if len(running_browsers) > 1 else ''} currently running!")
+            print("   Please close ALL browsers completely before running the migration.")
+            print("   This prevents:")
+            print("   • Arc: Intermittent extraction issues due to sync/file changes")
+            print("   • Zen: Database lock errors during import")
+            print("   💡 Tip: Make sure to quit browsers entirely, not just close windows.")
+            return False
 
         # Step 1: Extract Arc pinned tabs
         print("\n📌 Step 1: Extracting Arc pinned tabs...")
