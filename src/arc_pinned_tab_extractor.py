@@ -177,10 +177,15 @@ class ArcPinnedTabExtractor:
                     item_data = items[i + 1]
 
                     # Check which space this item belongs to
+                    item_title = item_data.get('title', 'Untitled')
+                    found_space = False
+
                     for space_id, space_info in spaces_info.items():
                         space_name = space_info['name']
                         if self._item_belongs_to_space(item_id, space_id, items_lookup, data):
+                            found_space = True
                             data_section = item_data.get('data', {})
+
 
                             if 'tab' in data_section:
                                 # This is a pinned tab
@@ -190,6 +195,7 @@ class ArcPinnedTabExtractor:
 
                                 if url:  # Only include tabs with URLs
                                     folder_path = self._get_folder_path_local(item_data.get('parentID'), items_lookup, space_id, data)
+
 
                                     pinned_tab = ArcPinnedTab(
                                         url=url,
@@ -218,6 +224,7 @@ class ArcPinnedTabExtractor:
                             global_index += 1
                             break  # Item belongs to one space only
 
+
                     i += 2
                 else:
                     i += 1
@@ -235,6 +242,7 @@ class ArcPinnedTabExtractor:
 
                         # Get the correct visual order using container childrenIds
                         display_order = self._get_space_display_order(space_id, items_lookup, data)
+
 
                         if display_order:
                             # Process items in Arc's exact display order with recursive folder extraction
@@ -641,8 +649,20 @@ class ArcPinnedTabExtractor:
         if len(containers) > 1 and 'items' in containers[1]:
             items = containers[1]['items']
 
-            # Check each container ID to find one with childrenIds (the display order container)
-            for container_id in space_container_ids:
+            # Check each container ID to find the best one with childrenIds
+            # Prefer containers that come after 'pinned' in the containerIDs list
+            pinned_containers = []
+            unpinned_containers = []
+
+            try:
+                pinned_index = space_container_ids.index('pinned')
+                unpinned_index = space_container_ids.index('unpinned')
+            except ValueError:
+                # Fallback if no pinned/unpinned markers found
+                pinned_index = len(space_container_ids)
+                unpinned_index = -1
+
+            for idx, container_id in enumerate(space_container_ids):
                 if container_id in ['pinned', 'unpinned']:  # Skip logical containers
                     continue
 
@@ -651,8 +671,33 @@ class ArcPinnedTabExtractor:
                     if i + 1 < len(items) and items[i] == container_id:
                         container_data = items[i + 1]
                         children_ids = container_data.get('childrenIds', [])
-                        if children_ids:  # Found container with actual display order
-                            return children_ids
+                        if children_ids:
+                            # Categorize based on position relative to pinned/unpinned
+                            if idx > pinned_index:
+                                pinned_containers.append(children_ids)
+                            elif idx > unpinned_index:
+                                unpinned_containers.append(children_ids)
+                        break
+
+            # Prefer pinned containers, fallback to unpinned, then combine if needed
+            if pinned_containers:
+                # If multiple pinned containers, take the largest one
+                return max(pinned_containers, key=len)
+            elif unpinned_containers:
+                return max(unpinned_containers, key=len)
+            else:
+                # Last resort: combine all containers with children
+                combined = []
+                for container_id in space_container_ids:
+                    if container_id in ['pinned', 'unpinned']:
+                        continue
+                    for i in range(0, len(items), 2):
+                        if i + 1 < len(items) and items[i] == container_id:
+                            container_data = items[i + 1]
+                            children_ids = container_data.get('childrenIds', [])
+                            combined.extend(children_ids)
+                            break
+                return combined
 
         return []
 
