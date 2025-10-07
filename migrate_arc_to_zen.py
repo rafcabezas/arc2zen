@@ -16,6 +16,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 import logging
+import os
 
 # Import our modules
 sys.path.append(str(Path(__file__).parent / "src"))
@@ -55,11 +56,19 @@ class Arc2ZenMigrator:
 
         try:
             # Check for actual Arc browser processes (be specific to avoid false positives)
-            result = subprocess.run(
-                ['pgrep', '-f', '/Applications/Arc.app'],
-                capture_output=True,
-                text=True
-            )
+
+            if os.name == "nt":
+                result = subprocess.run(
+                    ['powershell', 'Get-Process -Name "Arc" -erroraction silentlycontinue | Select-Object id'],
+                    capture_output=True,
+                    text=True,
+                )
+            else:
+                result = subprocess.run(
+                    ['pgrep', '-f', '/Applications/Arc.app'],
+                    capture_output=True,
+                    text=True
+                )
             if result.returncode == 0 and result.stdout.strip():
                 running_browsers.append('Arc')
 
@@ -68,22 +77,32 @@ class Arc2ZenMigrator:
                 '/Applications/Zen Browser.app',
                 '/Applications/zen.app',
                 '/usr/local/bin/zen',
-                'zen-browser'  # For AppImage/Flatpak installations
+                'zen-browser',  # For AppImage/Flatpak installations
+                'Zen' # For Windows
             ]
 
             for zen_path in zen_paths:
-                result = subprocess.run(
-                    ['pgrep', '-f', zen_path],
-                    capture_output=True,
-                    text=True
-                )
+                if os.name == "nt":
+                    result = subprocess.run(
+                        ['powershell', f'Get-Process -Name "{zen_path}" -erroraction silentlycontinue | Select-Object id'],
+                        capture_output=True,
+                        text=True
+                    )
+                else:
+                    result = subprocess.run(
+                        ['pgrep', '-f', zen_path],
+                        capture_output=True,
+                        text=True
+                    )
                 if result.returncode == 0 and result.stdout.strip():
                     if 'Zen' not in running_browsers:
                         running_browsers.append('Zen')
                     break
 
         except Exception as e:
-            logger.warning(f"Could not check if browsers are running: {e}")
+            # Ignore false windows file not found error                                
+            if not "WinError 2" in str(e):
+                logger.warning(f"Could not check if browsers are running: {e}")
 
         return running_browsers, len(running_browsers) > 0
 
@@ -165,7 +184,7 @@ class Arc2ZenMigrator:
         print("\n📥 Step 4: Importing to Zen browser...")
 
         # Load export data
-        with open(self.temp_export_file, 'r') as f:
+        with open(self.temp_export_file, 'r', encoding="utf-8") as f:
             arc_export_data = json.load(f)
 
         if dry_run:
