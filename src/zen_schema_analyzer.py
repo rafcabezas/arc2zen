@@ -10,6 +10,7 @@ import sqlite3
 from pathlib import Path
 from typing import Dict, List, Optional
 import logging
+import os
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -20,8 +21,12 @@ class ZenSchemaAnalyzer:
     """Analyzes Zen browser database schema."""
 
     def __init__(self):
-        self.home_dir = Path.home()
-        self.zen_data_dir = self.home_dir / "Library/Application Support/zen"
+        if os.name == "nt":
+            self.home_dir = Path(os.path.expanduser("~\\"))
+            self.zen_data_dir = self.home_dir / "AppData/Roaming/zen"
+        else:
+            self.home_dir = Path.home()
+            self.zen_data_dir = self.home_dir / "Library/Application Support/zen"
 
     def find_zen_profiles(self) -> List[Path]:
         """Find all Zen browser profile directories, sorted by modification time (newest first)."""

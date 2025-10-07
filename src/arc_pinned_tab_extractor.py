@@ -12,6 +12,7 @@ from typing import List, Dict, Optional, Any
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 import logging
+import os
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -63,8 +64,12 @@ class ArcPinnedTabExtractor:
     """Extracts pinned tabs with folder structure from Arc's StorableSidebar.json."""
 
     def __init__(self):
-        self.home_dir = Path.home()
-        self.arc_sidebar_file = self.home_dir / "Library/Application Support/Arc/StorableSidebar.json"
+        if os.name == "nt":
+            self.home_dir = Path(os.path.expanduser("~\\"))
+            self.arc_sidebar_file = self.home_dir / "AppData/Local/Packages/TheBrowserCompany.Arc_ttt1ap7aakyb4/LocalCache/Local/Arc/StorableSidebar.json"
+        else:
+            self.home_dir = Path.home()
+            self.arc_sidebar_file = self.home_dir / "Library/Application Support/Arc/StorableSidebar.json"
 
     def extract_pinned_tabs(self) -> List[ArcSpace]:
         """Extract all pinned tabs organized by spaces with folder structure."""
@@ -73,7 +78,7 @@ class ArcPinnedTabExtractor:
             return []
 
         try:
-            with open(self.arc_sidebar_file, 'r') as f:
+            with open(self.arc_sidebar_file, 'r', encoding="utf-8") as f:
                 sidebar_data = json.load(f)
 
             logger.info("✅ Loaded Arc StorableSidebar.json")
