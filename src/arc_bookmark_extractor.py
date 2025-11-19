@@ -56,8 +56,12 @@ class ArcBookmarkExtractor:
     """Extracts bookmarks and history from Arc profile databases."""
 
     def __init__(self):
-        self.home_dir = Path.home()
-        self.arc_data_dir = self.home_dir / "Library/Application Support/Arc/User Data"
+	if os.name == "nt":
+		self.home_dir = os.path.expanduser(r"~\")
+		self.arc_data_dir = self.home_dir / "AppData/Local/Packages/TheBrowserCompany.Arc_ttt1ap7aakyb4/LocalCache/Local/Arc/User Data"
+	else:
+        	self.home_dir = Path.home()
+        	self.arc_data_dir = self.home_dir / "Library/Application Support/Arc/User Data"
 
     def extract_profile_bookmarks(self, profile_path: Path, profile_id: str = "") -> Optional[ProfileBookmarks]:
         """Extract bookmarks from a single Arc profile."""
