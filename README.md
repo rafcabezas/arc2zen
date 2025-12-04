@@ -9,7 +9,7 @@ A complete Python-based migration tool that converts Arc browser spaces and pinn
 - **Python 3.7+**
 - **Arc Browser** (with spaces and pinned tabs you want to migrate)
 - **Zen Browser** (installed and run at least once)
-- **macOS** (current implementation)
+- **macOS** or **Windows** (current implementation)
 
 ### Installation
 
