@@ -100,20 +100,20 @@ class Arc2ZenMigrator:
                     break
 
         except Exception as e:
-            # Ignore false windows file not found error                                
+            # Ignore false windows file not found error
             if not "WinError 2" in str(e):
                 logger.warning(f"Could not check if browsers are running: {e}")
 
         return running_browsers, len(running_browsers) > 0
 
-    def run_migration(self, dry_run: bool = False, zen_profile_name: Optional[str] = None) -> bool:
+    def run_migration(self, dry_run: bool = False, zen_profile_name: Optional[str] = None, arc_space_name: Optional[str] = None) -> bool:
         """Run the complete Arc to Zen migration process."""
 
         print("🔄 Arc to Zen Browser Migration v1.2 (2025-09-29)")
         print("=" * 50)
 
         logger.info("Starting Arc to Zen migration")
-        logger.info(f"Options: dry_run={dry_run}, zen_profile={zen_profile_name}")
+        logger.info(f"Options: dry_run={dry_run}, zen_profile={zen_profile_name}, arc_space={arc_space_name}")
 
         # Clean up any previous export file to prevent caching issues
         if self.temp_export_file.exists():
@@ -135,14 +135,38 @@ class Arc2ZenMigrator:
         # Step 1: Extract Arc pinned tabs
         print("\n📌 Step 1: Extracting Arc pinned tabs...")
         arc_extractor = ArcPinnedTabExtractor()
-        arc_spaces = arc_extractor.extract_pinned_tabs()
+        all_arc_spaces = arc_extractor.extract_pinned_tabs()
 
-        if not arc_spaces:
+        if not all_arc_spaces:
             print("❌ No Arc pinned tabs found! Make sure Arc browser is installed.")
             return False
 
+        # Filter by space name if specified
+        if arc_space_name:
+            print(f"\n🔍 Filtering for Arc space: '{arc_space_name}'")
+            arc_spaces = []
+            for space in all_arc_spaces:
+                # Case-insensitive partial matching for convenience
+                if arc_space_name.lower() in space.space_name.lower():
+                    arc_spaces.append(space)
+
+            if not arc_spaces:
+                print(f"❌ No Arc space found matching '{arc_space_name}'")
+                print("\n📋 Available Arc spaces:")
+                for space in all_arc_spaces:
+                    print(f"  • {space.space_name}")
+                return False
+
+            if len(arc_spaces) > 1:
+                print(f"⚠️  Multiple spaces match '{arc_space_name}':")
+                for space in arc_spaces:
+                    print(f"  • {space.space_name}")
+                print("💡 Consider using a more specific space name.")
+        else:
+            arc_spaces = all_arc_spaces
+
         total_extracted = sum(len(space.pinned_tabs) for space in arc_spaces)
-        print(f"✅ Found {len(arc_spaces)} Arc spaces with {total_extracted} pinned tabs")
+        print(f"✅ Found {len(arc_spaces)} Arc space{'s' if len(arc_spaces) > 1 else ''} with {total_extracted} pinned tabs")
         for space in arc_spaces:
             print(f"  • {space.space_name}: {len(space.pinned_tabs)} tabs, {len(space.folders)} folders")
 
@@ -301,6 +325,8 @@ Examples:
   python3 migrate_arc_to_zen.py                    # Full migration
   python3 migrate_arc_to_zen.py --dry-run          # Test run only
   python3 migrate_arc_to_zen.py --zen-profile Default  # Specific Zen profile
+  python3 migrate_arc_to_zen.py --arc-space Personal  # Migrate only Personal space
+  python3 migrate_arc_to_zen.py --arc-space Work --dry-run  # Test migrate Work space
         """
     )
 
@@ -315,6 +341,12 @@ Examples:
         '--zen-profile',
         type=str,
         help='Name or partial name of Zen profile to import to'
+    )
+
+    parser.add_argument(
+        '--arc-space',
+        type=str,
+        help='Name or partial name of Arc space to migrate (case-insensitive). If not specified, all spaces are migrated.'
     )
 
     parser.add_argument(
@@ -334,7 +366,8 @@ Examples:
     try:
         success = migrator.run_migration(
             dry_run=args.dry_run,
-            zen_profile_name=args.zen_profile
+            zen_profile_name=args.zen_profile,
+            arc_space_name=args.arc_space
         )
 
         if success and not args.dry_run:

@@ -31,6 +31,9 @@ python3 migrate_arc_to_zen.py --dry-run
 
 # If everything looks good, run the actual migration
 python3 migrate_arc_to_zen.py
+
+# Migrate only a specific Arc space (useful for testing or selective migration)
+python3 migrate_arc_to_zen.py --arc-space "Personal" --dry-run
 ```
 
 ### Advanced Usage
@@ -38,6 +41,10 @@ python3 migrate_arc_to_zen.py
 ```bash
 # Migrate with custom settings
 python3 migrate_arc_to_zen.py --min-visits 5 --zen-profile "Default" --verbose
+
+# Migrate only a specific Arc space
+python3 migrate_arc_to_zen.py --arc-space "Personal"
+python3 migrate_arc_to_zen.py --arc-space "Work" --dry-run
 
 # See all available options
 python3 migrate_arc_to_zen.py --help
@@ -139,6 +146,7 @@ python3 src/zen_pinned_tab_importer.py --dry-run
 - `--dry-run` - Test migration without making changes
 - `--min-visits N` - Only migrate bookmarks with N+ visits (default: 2)
 - `--zen-profile NAME` - Specify target Zen profile name
+- `--arc-space NAME` - Migrate only a specific Arc space by name (case-insensitive partial matching). If not specified, all spaces are migrated.
 - `--verbose` - Enable detailed debug logging
 - `--help` - Show all available options
 
