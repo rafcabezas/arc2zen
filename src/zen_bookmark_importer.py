@@ -63,17 +63,47 @@ class ZenBookmarkImporter:
             logger.error(f"Zen places.sqlite not found: {self.places_db}")
             return False
 
+        # Check for profile lock file
+        parentlock = self.zen_profile_path / ".parentlock"
+        if parentlock.exists():
+            logger.error("❌ Zen profile is locked (.parentlock exists)")
+            logger.error("   Make sure Zen browser is completely closed")
+            return False
+
         try:
-            # Test connection
+            # Test read access
             conn = sqlite3.connect(f"file:{self.places_db}?mode=ro", uri=True, timeout=1.0)
+            conn.execute("SELECT 1")
             conn.close()
+
+            # Test write access with a more thorough check
+            conn = sqlite3.connect(self.places_db, timeout=2.0)
+            cursor = conn.cursor()
+            # Try to start a transaction
+            cursor.execute("BEGIN IMMEDIATE")
+            cursor.execute("SELECT 1")
+            conn.rollback()
+            conn.close()
+
             logger.info("✅ Zen database accessible")
             return True
         except sqlite3.OperationalError as e:
-            if "database is locked" in str(e).lower():
-                logger.error("❌ Zen database is locked - please close Zen browser first")
+            error_msg = str(e).lower()
+            if "locked" in error_msg:
+                logger.error("❌ Zen database is locked")
+                logger.error("   Possible causes:")
+                logger.error("   • Zen browser is still running (check Activity Monitor)")
+                logger.error("   • Another migration is in progress")
+                logger.error("   • Database was left in a locked state from a previous failed migration")
+                logger.error("   Try: pkill -9 zen ; sleep 2 ; then retry")
+            elif "unable to open" in error_msg:
+                logger.error(f"❌ Unable to open database: {e}")
+                logger.error("   Check file permissions and that the path is correct")
             else:
                 logger.error(f"❌ Database error: {e}")
+            return False
+        except Exception as e:
+            logger.error(f"❌ Unexpected error checking database: {e}")
             return False
 
     def backup_database(self) -> bool:
@@ -81,13 +111,17 @@ class ZenBookmarkImporter:
         import os
         import shutil
 
-        # Create backup in current working directory
+        # Create backups directory if it doesn't exist
+        backups_dir = Path(os.getcwd()) / "backups"
+        backups_dir.mkdir(exist_ok=True)
+
+        # Create backup in backups directory
         backup_filename = f"zen_database_backup_{int(time.time())}.sqlite"
-        backup_path = Path(os.getcwd()) / backup_filename
+        backup_path = backups_dir / backup_filename
 
         try:
             shutil.copy2(self.places_db, backup_path)
-            logger.info(f"✅ Database backed up to: {backup_path.name}")
+            logger.info(f"✅ Database backed up to: backups/{backup_path.name}")
             return True
         except Exception as e:
             logger.error(f"❌ Failed to backup database: {e}")
