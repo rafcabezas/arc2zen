@@ -82,7 +82,16 @@ class ArcPinnedTabExtractor:
                 sidebar_data = json.load(f)
 
             logger.info("✅ Loaded Arc StorableSidebar.json")
-            return self._parse_local_sidebar_data(sidebar_data)
+
+            # Try local sidebar first (fast path for most users)
+            arc_spaces = self._parse_local_sidebar_data(sidebar_data)
+
+            # If local sidebar is empty/incomplete, fall back to sync data
+            if not arc_spaces:
+                logger.info("⚠️  Local sidebar empty, trying sync data fallback...")
+                arc_spaces = self._parse_sidebar_data(sidebar_data)
+
+            return arc_spaces
 
         except Exception as e:
             logger.error(f"Failed to parse StorableSidebar.json: {e}")
@@ -163,9 +172,25 @@ class ArcPinnedTabExtractor:
                     item_id = items[i]
                     item_data = items[i + 1]
                     items_lookup[item_id] = item_data
+
+                    # Debug: Show what type of item this is
+                    if logger.level <= logging.DEBUG:
+                        data_section = item_data.get('data', {})
+                        if 'tab' in data_section:
+                            logger.debug(f"  🔍 Found tab item: {item_id[:20]}... - {item_data.get('title', 'Untitled')}")
+                        elif 'list' in data_section:
+                            logger.debug(f"  🔍 Found folder item: {item_id[:20]}... - {item_data.get('title', 'Untitled')}")
+                        elif 'itemContainer' in data_section:
+                            container_type = data_section['itemContainer'].get('containerType', {})
+                            logger.debug(f"  🔍 Found container item: {item_id[:20]}... - Type: {list(container_type.keys())}")
+                        else:
+                            logger.debug(f"  🔍 Found unknown item type: {item_id[:20]}... - Keys: {list(data_section.keys())}")
+
                     i += 2
                 else:
                     i += 1
+
+            logger.debug(f"Built items_lookup with {len(items_lookup)} items")
 
             # Process items in original order to preserve sidebar ordering
             pinned_tabs_by_space = {space_id: [] for space_id in spaces_info.keys()}
@@ -238,6 +263,7 @@ class ArcPinnedTabExtractor:
             # Use the sidebar spaces array to preserve Arc's space ordering
             if len(containers) > 1 and 'spaces' in containers[1]:
                 sidebar_spaces = containers[1]['spaces']
+                logger.debug(f"Processing {len(sidebar_spaces) // 2} spaces from sidebar")
                 for i in range(0, len(sidebar_spaces), 2):
                     if i + 1 < len(sidebar_spaces):
                         space_id = sidebar_spaces[i]
@@ -245,8 +271,11 @@ class ArcPinnedTabExtractor:
                         space_name = space_info['name']
                         space_icon = space_info['icon']
 
+                        logger.debug(f"  🔍 Processing space: {space_name} ({space_id})")
+
                         # Get the correct visual order using container childrenIds
                         display_order = self._get_space_display_order(space_id, items_lookup, data)
+                        logger.debug(f"    Display order has {len(display_order)} items")
 
 
                         if display_order:
@@ -580,8 +609,11 @@ class ArcPinnedTabExtractor:
                 if i + 1 < len(spaces) and isinstance(spaces[i], str):
                     if spaces[i] == space_id:
                         space_data = spaces[i + 1]
-                        return space_data.get('containerIDs', [])
+                        container_ids = space_data.get('containerIDs', [])
+                        logger.debug(f"      🔍 Space container IDs: {container_ids}")
+                        return container_ids
 
+        logger.debug(f"      ⚠️  No container IDs found for space {space_id}")
         return []
 
     def _is_pinned_content(self, item_id: str, items_lookup: Dict, data: Dict) -> bool:
@@ -647,6 +679,7 @@ class ArcPinnedTabExtractor:
         # Get space's container IDs
         space_container_ids = self._get_space_container_ids(space_id, data)
         if not space_container_ids:
+            logger.debug(f"      ⚠️  No container IDs, returning empty display order")
             return []
 
         # Look for containers with childrenIds in the items data
@@ -662,34 +695,55 @@ class ArcPinnedTabExtractor:
             try:
                 pinned_index = space_container_ids.index('pinned')
                 unpinned_index = space_container_ids.index('unpinned')
-            except ValueError:
+                logger.debug(f"      🔍 Found pinned at index {pinned_index}, unpinned at {unpinned_index}")
+            except ValueError as e:
                 # Fallback if no pinned/unpinned markers found
                 pinned_index = len(space_container_ids)
                 unpinned_index = -1
+                logger.debug(f"      ⚠️  No pinned/unpinned markers found: {e}")
 
             for idx, container_id in enumerate(space_container_ids):
                 if container_id in ['pinned', 'unpinned']:  # Skip logical containers
                     continue
 
+                logger.debug(f"      🔍 Checking container {container_id[:20]}... (idx={idx})")
+
                 # Look for this container UUID in items
+                found_container = False
                 for i in range(0, len(items), 2):
                     if i + 1 < len(items) and items[i] == container_id:
+                        found_container = True
                         container_data = items[i + 1]
                         children_ids = container_data.get('childrenIds', [])
+                        logger.debug(f"        ✅ Found container with {len(children_ids)} children")
                         if children_ids:
                             # Categorize based on position relative to pinned/unpinned
                             if idx > pinned_index:
                                 pinned_containers.append(children_ids)
+                                logger.debug(f"        📌 Added to pinned_containers")
                             elif idx > unpinned_index:
                                 unpinned_containers.append(children_ids)
+                                logger.debug(f"        📋 Added to unpinned_containers")
                         break
+
+                if not found_container:
+                    logger.debug(f"        ⚠️  Container not found in items")
 
             # Prefer pinned containers, fallback to unpinned, then combine if needed
             if pinned_containers:
-                # If multiple pinned containers, take the largest one
-                return max(pinned_containers, key=len)
+                # If multiple pinned containers, combine all of them (flatten)
+                result = []
+                for container_children in pinned_containers:
+                    result.extend(container_children)
+                logger.debug(f"      ✅ Returning {len(result)} items from {len(pinned_containers)} pinned container(s)")
+                return result
             elif unpinned_containers:
-                return max(unpinned_containers, key=len)
+                # Combine all unpinned containers
+                result = []
+                for container_children in unpinned_containers:
+                    result.extend(container_children)
+                logger.debug(f"      ✅ Returning {len(result)} items from {len(unpinned_containers)} unpinned container(s)")
+                return result
             else:
                 # Last resort: combine all containers with children
                 combined = []
@@ -702,8 +756,10 @@ class ArcPinnedTabExtractor:
                             children_ids = container_data.get('childrenIds', [])
                             combined.extend(children_ids)
                             break
+                logger.debug(f"      ⚠️  Using combined fallback with {len(combined)} items")
                 return combined
 
+        logger.debug(f"      ⚠️  No items found in containers, returning empty")
         return []
 
     def _get_folder_path_local(self, parent_id: str, items_lookup: Dict, space_id: str, data: Dict) -> List[str]:
@@ -726,7 +782,7 @@ class ArcPinnedTabExtractor:
         return self._get_folder_path_local(parent_data.get('parentID'), items_lookup, space_id, data)
 
     def _parse_sidebar_data(self, data: Dict) -> List[ArcSpace]:
-        """Parse the complete sidebar data structure."""
+        """Parse the complete sidebar data structure from sync data."""
         arc_spaces = []
 
         # Get space models from sync data
@@ -741,12 +797,39 @@ class ArcPinnedTabExtractor:
                     space_data = space_models[i + 1].get('value', {})
                     space_name = space_data.get('title', f'Space {space_id}')
 
+                    # Extract icon and color
+                    icon = None
+                    color = None
+                    custom_info = space_data.get('customInfo', {})
+
+                    # Extract icon
+                    icon_type = custom_info.get('iconType', {})
+                    if 'emoji_v2' in icon_type:
+                        icon = icon_type['emoji_v2']
+                        logger.info(f"  🎨 Found icon for {space_name}: {icon}")
+
+                    # Extract color
+                    window_theme = custom_info.get('windowTheme', {})
+                    if window_theme:
+                        primary_palette = window_theme.get('primaryColorPalette', {})
+                        if primary_palette:
+                            mid_tone = primary_palette.get('midTone', {})
+                            if mid_tone and 'red' in mid_tone and 'green' in mid_tone and 'blue' in mid_tone:
+                                r = max(0, min(1, mid_tone['red']))
+                                g = max(0, min(1, mid_tone['green']))
+                                b = max(0, min(1, mid_tone['blue']))
+                                color = {'r': r, 'g': g, 'b': b}
+                                logger.info(f"  🎨 Found color for {space_name}: RGB({r:.3f}, {g:.3f}, {b:.3f})")
+
                     logger.info(f"📍 Processing space: {space_name}")
 
                     # Find pinned container for this space
                     pinned_container_id = self._find_pinned_container(data, space_id)
                     if pinned_container_id:
                         arc_space = self._extract_space_content(data, space_id, space_name, pinned_container_id)
+                        # Update icon and color on the extracted space
+                        arc_space.icon = icon
+                        arc_space.color = color
                         if arc_space.pinned_tabs:
                             arc_spaces.append(arc_space)
                 i += 2
@@ -802,6 +885,9 @@ class ArcPinnedTabExtractor:
             else:
                 i += 1
 
+        # Track index for ordering
+        index_counter = 0
+
         # Find all items that belong to the pinned container
         for item_id, item_data in items_lookup.items():
             parent_id = item_data.get('parentID')
@@ -826,9 +912,11 @@ class ArcPinnedTabExtractor:
                             space_name=space_name,
                             folder_path=folder_path,
                             tab_id=item_id,
-                            parent_id=parent_id
+                            parent_id=parent_id,
+                            index=index_counter
                         )
                         pinned_tabs.append(pinned_tab)
+                        index_counter += 1
 
                 elif 'list' in data_section:
                     # This is a folder
@@ -837,9 +925,11 @@ class ArcPinnedTabExtractor:
                         title=item_data.get('title', 'Untitled Folder'),
                         parent_id=parent_id,
                         space_id=space_id,
-                        children_ids=item_data.get('childrenIds', [])
+                        children_ids=item_data.get('childrenIds', []),
+                        index=index_counter
                     )
                     folders.append(folder)
+                    index_counter += 1
 
         logger.info(f"  ✅ {space_name}: {len(pinned_tabs)} pinned tabs, {len(folders)} folders")
         return ArcSpace(space_id, space_name, pinned_tabs, folders, None, None)

@@ -41,6 +41,7 @@ arc_pinned_tabs_export.json
 test_export.json
 *.log
 *.backup.*
+backups/
 
 # Migration script generated files
 workspace_uuid_mapping.json
