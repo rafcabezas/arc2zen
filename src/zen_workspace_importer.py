@@ -285,7 +285,10 @@ class ZenWorkspaceImporter:
                 space_name = space['space_name']
                 space_icon = space.get('icon')  # Get icon from Arc data
                 space_color = space.get('color')  # Get color from Arc data
-                container_id = container_mappings.get(space_name, 1)
+                container_id = container_mappings.get(space_name)
+                if not container_id:
+                    logger.warning(f"No container mapping found for '{space_name}', using default container ID 1")
+                    container_id = 1
 
                 # Check if workspace already exists
                 existing_uuid = None
@@ -301,6 +304,11 @@ class ZenWorkspaceImporter:
                     if space_icon or space_color:
                         self.update_workspace_icon_and_color(existing_uuid, space_icon, space_color)
                 else:
+                    # Validate container_id is not None
+                    if not container_id:
+                        logger.error(f"Invalid container_id for space '{space_name}'")
+                        continue
+
                     # Create new workspace with icon and color
                     workspace_uuid = self.create_workspace(space_name, container_id, position, space_icon, space_color)
                     if workspace_uuid:

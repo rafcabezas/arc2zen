@@ -17,6 +17,8 @@ from pathlib import Path
 from typing import Optional
 import logging
 import os
+import shutil
+import time
 
 # Import our modules
 sys.path.append(str(Path(__file__).parent / "src"))
@@ -26,6 +28,7 @@ from zen_bookmark_importer import ZenBookmarkImporter
 from zen_space_importer import ZenSpaceImporter, ZenProfile
 from zen_pinned_tab_importer import ZenPinnedTabImporter
 from zen_workspace_importer import ZenWorkspaceImporter
+from zen_sessionstore_manager import ZenSessionstoreManager
 
 # Set up logging
 logging.basicConfig(
@@ -105,6 +108,7 @@ class Arc2ZenMigrator:
                 logger.warning(f"Could not check if browsers are running: {e}")
 
         return running_browsers, len(running_browsers) > 0
+
 
     def run_migration(self, dry_run: bool = False, zen_profile_name: Optional[str] = None, arc_space_name: Optional[str] = None) -> bool:
         """Run the complete Arc to Zen migration process."""
@@ -229,6 +233,7 @@ class Arc2ZenMigrator:
             else:
                 print("✅ Database backup created successfully")
 
+
         # Step 4a: Create Zen workspaces (containers)
         print("\n🏗️  Step 4a: Creating Zen workspaces...")
         zen_profile = ZenProfile(name=selected_zen_profile.name, path=selected_zen_profile)
@@ -268,11 +273,37 @@ class Arc2ZenMigrator:
         workspace_importer = ZenWorkspaceImporter(selected_zen_profile)
         workspace_success = workspace_importer.import_arc_workspaces(arc_export_data, container_mappings, workspace_mappings, dry_run=dry_run)
 
-        # Step 4d: Import as bookmarks (for backup/organization)
-        print("\n📚 Step 4d: Importing as bookmarks...")
+        # Step 4d: Create sessionstore with tabs (NEW - replaces sessionstore clearing)
+        if not dry_run:
+            print("\n🔧 Step 4d: Creating Zen sessionstore with tabs...")
+            try:
+                import lz4.block  # Check if lz4 is available
+
+                sessionstore_manager = ZenSessionstoreManager(selected_zen_profile)
+                sessionstore_success = sessionstore_manager.create_workspaces_with_tabs(
+                    arc_export_data, container_mappings, dry_run=dry_run
+                )
+
+                if sessionstore_success:
+                    print("✅ Sessionstore created - tabs will appear on next Zen startup")
+                else:
+                    print("⚠️ Failed to create sessionstore - tabs may not appear")
+                    print("💡 Tabs are in database, but you may need to manually create them")
+
+            except ImportError:
+                print("⚠️ lz4 module not installed - cannot create sessionstore")
+                print("💡 Run: pip3 install lz4")
+                print("💡 Then re-run migration or manually open tabs in Zen")
+                sessionstore_success = False
+        else:
+            print("\n🔧 Step 4d: Would create sessionstore with tabs")
+            sessionstore_success = True
+
+        # Step 4e: Import as bookmarks (for backup/organization)
+        print("\n📚 Step 4e: Importing as bookmarks...")
         bookmark_success = zen_importer.import_arc_bookmarks(arc_export_data, dry_run=dry_run)
 
-        success = space_success and pinned_success and workspace_success and bookmark_success
+        success = space_success and pinned_success and workspace_success and sessionstore_success and bookmark_success
 
         # Cleanup
         if self.temp_export_file.exists():
@@ -284,8 +315,9 @@ class Arc2ZenMigrator:
                 print("💡 Run without --dry-run to perform actual migration.")
             else:
                 print("\n🎉 Migration completed successfully!")
-                print(f"📌 Your Arc pinned tabs are now in Zen as actual pinned tabs")
+                print(f"📌 Your Arc pinned tabs are now in Zen database AND sessionstore")
                 print(f"🏗️ Created {len(arc_spaces)} Zen workspaces for your Arc spaces")
+                print(f"🔧 SessionStore updated - tabs will appear on Zen startup")
                 print(f"📁 Bookmarks also imported as backup under 'Unfiled Bookmarks'")
                 print(f"📊 Migrated {total_extracted} pinned tabs from {len(arc_spaces)} Arc spaces")
 

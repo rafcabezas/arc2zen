@@ -264,6 +264,13 @@ class ZenPinnedTabImporter:
                 self.imported_in_session.add(session_key)
 
                 conn.commit()
+
+                # Verify insertion succeeded
+                if cursor.rowcount != 1:
+                    logger.warning(f"  ⚠️ INSERT affected {cursor.rowcount} rows for tab '{tab.title}'")
+                else:
+                    logger.debug(f"  ✅ Inserted tab '{tab.title}' to workspace {tab.workspace_uuid}")
+
                 return True
 
         except Exception as e:
@@ -443,8 +450,12 @@ class ZenPinnedTabImporter:
                 workspace_uuid = workspace_mappings.get(space_name)
 
                 if not workspace_uuid:
-                    logger.warning(f"No workspace UUID for space: {space_name}")
+                    logger.error(f"Missing workspace UUID for space: {space_name}")
                     continue
+
+                # Validate workspace_uuid format
+                if not workspace_uuid.startswith('{') or not workspace_uuid.endswith('}'):
+                    logger.warning(f"Workspace UUID has unexpected format: {workspace_uuid}")
 
                 logger.info(f"  📁 Processing {space_name}: {len(pinned_tabs)} tabs, {len(folders)} folders (preserving Arc sidebar order)")
 
