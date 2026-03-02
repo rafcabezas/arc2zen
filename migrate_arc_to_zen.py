@@ -11,6 +11,7 @@ Usage:
 
 import argparse
 import json
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -25,6 +26,7 @@ from zen_schema_analyzer import ZenSchemaAnalyzer
 from zen_bookmark_importer import ZenBookmarkImporter
 from zen_space_importer import ZenSpaceImporter, ZenProfile
 from zen_pinned_tab_importer import ZenPinnedTabImporter
+from zen_sessions_importer import ZenSessionsImporter
 from zen_workspace_importer import ZenWorkspaceImporter
 
 # Set up logging
@@ -105,6 +107,36 @@ class Arc2ZenMigrator:
                 logger.warning(f"Could not check if browsers are running: {e}")
 
         return running_browsers, len(running_browsers) > 0
+
+    def detect_zen_storage_mode(self, zen_profile_path: Path) -> str:
+        """Detect how pinned tabs/workspaces are stored in current Zen profile.
+
+        Returns:
+            "legacy_db" if zen_pins/zen_workspaces tables exist in places.sqlite.
+            "session_file" otherwise (modern zen-sessions.jsonlz4 storage).
+        """
+        places_db = zen_profile_path / "places.sqlite"
+        if not places_db.exists():
+            logger.warning("places.sqlite not found, defaulting to session_file mode")
+            return "session_file"
+
+        try:
+            with sqlite3.connect(f"file:{places_db}?mode=ro", uri=True, timeout=1.0) as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    SELECT name
+                    FROM sqlite_master
+                    WHERE type = 'table' AND name IN ('zen_pins', 'zen_workspaces')
+                    """
+                )
+                table_names = {row[0] for row in cursor.fetchall()}
+                if {"zen_pins", "zen_workspaces"}.issubset(table_names):
+                    return "legacy_db"
+        except Exception as e:
+            logger.warning(f"Failed to inspect Zen schema, defaulting to session_file mode: {e}")
+
+        return "session_file"
 
     def run_migration(self, dry_run: bool = False, zen_profile_name: Optional[str] = None, arc_space_name: Optional[str] = None) -> bool:
         """Run the complete Arc to Zen migration process."""
@@ -256,17 +288,37 @@ class Arc2ZenMigrator:
                 space_name = space['space_name']
                 container_mappings[space_name] = 1  # Default container
 
+        storage_mode = self.detect_zen_storage_mode(selected_zen_profile)
+        logger.info(f"Detected Zen storage mode: {storage_mode}")
+
         # Step 4b: Import as pinned tabs (actual pinned tabs, not bookmarks)
         print("\n📌 Step 4b: Importing as pinned tabs...")
-        pinned_tab_importer = ZenPinnedTabImporter(selected_zen_profile)
-        workspace_mappings = pinned_tab_importer.import_arc_pinned_tabs(arc_export_data, container_mappings, dry_run=dry_run)
-        # For dry run, workspace_mappings is empty dict, but that's expected
-        pinned_success = workspace_mappings is not None  # Success if we got workspace mappings (even empty for dry run)
+        workspace_mappings = None
+        if storage_mode == "legacy_db":
+            pinned_tab_importer = ZenPinnedTabImporter(selected_zen_profile)
+            workspace_mappings = pinned_tab_importer.import_arc_pinned_tabs(
+                arc_export_data, container_mappings, dry_run=dry_run
+            )
+            # For dry run, empty mapping is expected.
+            pinned_success = workspace_mappings is not None and (dry_run or len(workspace_mappings) > 0)
 
-        # Step 4c: Create actual Zen workspaces for each Arc space
-        print("\n🏗️  Step 4c: Creating actual Zen workspaces...")
-        workspace_importer = ZenWorkspaceImporter(selected_zen_profile)
-        workspace_success = workspace_importer.import_arc_workspaces(arc_export_data, container_mappings, workspace_mappings, dry_run=dry_run)
+            # Step 4c: Create actual Zen workspaces for each Arc space
+            print("\n🏗️  Step 4c: Creating actual Zen workspaces...")
+            workspace_importer = ZenWorkspaceImporter(selected_zen_profile)
+            workspace_success = workspace_importer.import_arc_workspaces(
+                arc_export_data, container_mappings, workspace_mappings, dry_run=dry_run
+            )
+        else:
+            print("ℹ️ Zen is using modern session storage (zen-sessions.jsonlz4)")
+            session_importer = ZenSessionsImporter(selected_zen_profile)
+            workspace_mappings = session_importer.import_arc_pinned_tabs(
+                arc_export_data, container_mappings, dry_run=dry_run
+            )
+            pinned_success = workspace_mappings is not None
+
+            print("\n🏗️  Step 4c: Creating actual Zen workspaces...")
+            print("ℹ️ Skipped: workspaces are managed directly in zen-sessions.jsonlz4")
+            workspace_success = pinned_success
 
         # Step 4d: Import as bookmarks (for backup/organization)
         print("\n📚 Step 4d: Importing as bookmarks...")

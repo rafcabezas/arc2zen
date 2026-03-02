@@ -251,8 +251,12 @@ If anything goes wrong:
 - **Key Files**: `places.sqlite` (bookmarks database), `prefs.js` (preferences)
 
 ### Database Schema
-- **zen_pins** table: Stores pinned tabs with workspace UUIDs
-- **zen_workspaces** table: Manages workspace definitions
+- **Modern Zen (recommended)**:
+  - `zen-sessions.jsonlz4`: Stores workspaces, pinned tabs, folders, groups (session-backed model)
+  - `zen_bookmarks_workspaces` table: Stores bookmark-to-workspace mapping metadata
+- **Legacy Zen (older builds)**:
+  - `zen_pins` table: Stores pinned tabs with workspace UUIDs
+  - `zen_workspaces` table: Manages workspace definitions
 - **moz_places** table: Standard Firefox bookmarks storage
 
 ## 🤝 Contributing
