@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import List, Dict, Optional
 from dataclasses import dataclass
 import logging
+import os
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
