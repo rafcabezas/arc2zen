@@ -27,6 +27,7 @@ from zen_space_importer import ZenSpaceImporter, ZenProfile
 from zen_pinned_tab_importer import ZenPinnedTabImporter
 from zen_workspace_importer import ZenWorkspaceImporter
 from zen_sessions_importer import ZenSessionsImporter
+from arc_history_migrator import ArcHistoryMigrator
 
 # Optional: Import sessionstore manager for open tabs (requires lz4)
 try:
@@ -123,6 +124,7 @@ class Arc2ZenMigrator:
         arc_space_name: Optional[str] = None,
         import_open_tabs: bool = False,
         no_containers: bool = False,
+        import_history: bool = False,
     ) -> bool:
         """Run the complete Arc to Zen migration process."""
 
@@ -133,7 +135,7 @@ class Arc2ZenMigrator:
         logger.info(
             f"Options: dry_run={dry_run}, zen_profile={zen_profile_name}, "
             f"arc_space={arc_space_name}, import_open_tabs={import_open_tabs}, "
-            f"no_containers={no_containers}"
+            f"no_containers={no_containers}, import_history={import_history}"
         )
 
         # Clean up any previous export file to prevent caching issues
@@ -313,7 +315,27 @@ class Arc2ZenMigrator:
         print("\n📚 Step 4d: Importing as bookmarks...")
         bookmark_success = zen_importer.import_arc_bookmarks(arc_export_data, dry_run=dry_run)
 
-        # Step 4e: Import open tabs to sessionstore
+        # Step 4e: Import browsing history
+        print("\n📜 Step 4e: Importing browsing history...")
+        history_success = True
+        if not import_history:
+            print("ℹ️  History skipped (use --history to include browsing history)")
+        else:
+            try:
+                history_migrator = ArcHistoryMigrator(selected_zen_profile)
+                history_stats = history_migrator.migrate(dry_run=dry_run)
+                if dry_run:
+                    print(f"🧪 Would migrate {history_stats['inserted']} URLs and {history_stats['visits']} visits")
+                else:
+                    print(f"✅ Migrated {history_stats['inserted']} new URLs, "
+                          f"updated {history_stats['updated']} existing, "
+                          f"{history_stats['visits']} visit records")
+            except Exception as e:
+                print(f"⚠️  History import error: {e}")
+                logger.error(f"History import failed: {e}")
+                history_success = False
+
+        # Step 4f: Import open tabs to sessionstore
         print("\n🔄 Step 4f: Importing open tabs...")
         session_success = True
         total_open_tabs = sum(len(space.get('open_tabs', [])) for space in arc_export_data.get('spaces', []))
@@ -341,7 +363,7 @@ class Arc2ZenMigrator:
         else:
             print("ℹ️  No open tabs to import")
 
-        success = space_success and pinned_success and workspace_success and bookmark_success and session_success
+        success = space_success and pinned_success and workspace_success and bookmark_success and session_success and history_success
 
         # Cleanup
         if self.temp_export_file.exists():
@@ -432,6 +454,13 @@ Examples:
     )
 
     parser.add_argument(
+        '--history',
+        action='store_true',
+        default=False,
+        help='Also migrate Arc browsing history to Zen'
+    )
+
+    parser.add_argument(
         '--no-containers',
         action='store_true',
         help='Do not assign any container to tabs (container ID 0 - regular browsing). By default, separate containers are created for each Arc space. You can manually assign containers later in Zen.'
@@ -452,6 +481,7 @@ Examples:
             arc_space_name=args.arc_space,
             import_open_tabs=args.open_tabs,
             no_containers=args.no_containers,
+            import_history=args.history,
         )
 
         if success and not args.dry_run:
