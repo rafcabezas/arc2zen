@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import List, Dict, Optional
 from dataclasses import dataclass
 import logging
+import os
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -35,15 +36,15 @@ class ArcProfileDiscovery:
     """Discovers and analyzes Arc browser profiles/spaces."""
 
     def __init__(self):
-	if os.name == "nt":
-		self.home_dir = os.path.expanduser(r"~\")
-		self.arc_data_dir = self.home_dir / "AppData/Local/Packages/TheBrowserCompany.Arc_ttt1ap7aakyb4/LocalCache/Local/Arc/User Data"
-		self.arc_prefs_main = self.home_dir / "AppData/Local/Packages/TheBrowserCompany.Arc_ttt1ap7aakyb4/LocalCache/Local/company.thebrowser.arc.plist"
-	else:
-        	self.home_dir = Path.home()
-        	self.arc_data_dir = self.home_dir / "Library/Application Support/Arc/User Data"
-        	self.arc_prefs_main = self.home_dir / "Library/Preferences/company.thebrowser.Browser.plist"
-	"""No dia in windows"""
+        if os.name == "nt":
+            self.home_dir = os.path.expanduser(r"~")
+            self.arc_data_dir = self.home_dir / "AppData/Local/Packages/TheBrowserCompany.Arc_ttt1ap7aakyb4/LocalCache/Local/Arc/User Data"
+            self.arc_prefs_main = self.home_dir / "AppData/Local/Packages/TheBrowserCompany.Arc_ttt1ap7aakyb4/LocalCache/Local/company.thebrowser.arc.plist"
+        else:
+            self.home_dir = Path.home()
+            self.arc_data_dir = self.home_dir / "Library/Application Support/Arc/User Data"
+            self.arc_prefs_main = self.home_dir / "Library/Preferences/company.thebrowser.Browser.plist"
+        """No dia in windows"""
         self.arc_prefs_dia = self.home_dir / "Library/Preferences/company.thebrowser.dia.plist"
 
     def check_arc_installation(self) -> bool:

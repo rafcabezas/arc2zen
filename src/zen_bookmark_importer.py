@@ -393,7 +393,7 @@ class ZenBookmarkImporter:
             from urllib.parse import urlparse
             parsed = urlparse(url)
             rev_host = ".".join(reversed(parsed.netloc.split(".")))
-        except:
+        except Exception:
             rev_host = ""
 
         last_visit = self._parse_visit_time(bookmark_data.get('last_visit_time'))
@@ -446,7 +446,7 @@ class ZenBookmarkImporter:
         try:
             dt = datetime.fromisoformat(visit_time_str.replace('Z', '+00:00'))
             return int(dt.timestamp() * 1_000_000)
-        except:
+        except Exception:
             return self._now_microseconds()
 
     def _hash_url(self, url: str) -> int:
