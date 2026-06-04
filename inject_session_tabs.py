@@ -243,6 +243,8 @@ def main():
     )
     parser.add_argument('--dry-run', action='store_true',
                         help='Preview what would be injected without writing')
+    parser.add_argument('--no-open-tabs', action='store_true',
+                        help='Skip Arc open (unpinned) tabs, inject pinned tabs only')
     args = parser.parse_args()
 
     print("=" * 60)
@@ -393,7 +395,7 @@ def main():
             s['essential' if tab.is_essential else 'pinned'] += 1
 
         # Open (unpinned) tabs
-        for tab in space.open_tabs:
+        for tab in (space.open_tabs if not args.no_open_tabs else []):
             if (ws_uuid, tab.url) in seen_urls:
                 s['skipped'] += 1
                 continue
