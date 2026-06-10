@@ -81,6 +81,20 @@ python3 inject_open_tabs.py --dry-run   # preview what would be injected
 python3 inject_open_tabs.py             # inject into both session files
 ```
 
+### Restoring Arc's Auto-Archived Tabs (optional)
+
+Arc archives inactive tabs on a timer (12h/24h/7d/30d). `restore_auto_archived.py`
+restores ONLY the tabs Arc closed by itself — archive items in
+`StorableArchiveItems.json` with `reason == "auto"`. Tabs closed manually
+(`reason == "manual"`, e.g. Cmd+W) are deliberately ignored. Each tab returns
+to its original space (resolved via the archive item's `source.space` UUID) as
+a real open tab, using the same dual-file mechanism as `inject_open_tabs.py`.
+
+```bash
+python3 restore_auto_archived.py --dry-run
+python3 restore_auto_archived.py
+```
+
 ### Advanced Usage
 
 ```bash
@@ -147,6 +161,7 @@ arc2zen/
 ├── migrate_arc_to_zen.py              # Main migration script
 ├── inject_session_tabs.py             # Inject pinned tabs/folders into zen-sessions.jsonlz4
 ├── inject_open_tabs.py                # Inject open tabs into BOTH session files (Zen 1.20+)
+├── restore_auto_archived.py           # Restore Arc auto-archived tabs (reason=auto)
 ├── requirements.txt                   # Python dependencies (lz4)
 ├── src/
 │   ├── arc_pinned_tab_extractor.py    # Extract Arc pinned tabs

@@ -24,6 +24,10 @@ python3 migrate_arc_to_zen.py --verbose
 # (writes BOTH zen-sessions.jsonlz4 and sessionstore.jsonlz4, zenSyncId-matched)
 python3 inject_open_tabs.py --dry-run
 python3 inject_open_tabs.py
+
+# Restore tabs Arc auto-archived (reason=auto) into their original workspaces
+python3 restore_auto_archived.py --dry-run
+python3 restore_auto_archived.py
 ```
 
 ### Component Testing
