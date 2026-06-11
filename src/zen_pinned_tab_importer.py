@@ -6,14 +6,13 @@ Imports Arc pinned tabs directly into Zen's zen_pins database table,
 creating proper folder hierarchy and workspace assignments.
 """
 
+import logging
 import sqlite3
 import uuid
-import logging
-from pathlib import Path
-from typing import List, Dict, Optional, Any, Tuple
 from dataclasses import dataclass
 from datetime import datetime
-import json
+from pathlib import Path
+from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -173,10 +172,16 @@ class ZenPinnedTabImporter:
             logger.error(f"Failed to create folder '{title}': {e}")
             return ""
 
-    def tab_exists(self, arc_tab_id: str, title: str, url: str) -> bool:
-        """Check if a tab already exists to prevent duplicates from multiple script runs."""
+    def tab_exists(self, arc_tab_id: str, title: str, url: str,
+                   workspace_uuid: Optional[str] = None) -> bool:
+        """Check if a tab already exists to prevent duplicates from multiple script runs.
+
+        Duplicate detection is scoped per-workspace because Arc Essentials are
+        per-profile in Arc but per-workspace in Zen — the same Arc tab can
+        legitimately be replicated into multiple Zen workspaces.
+        """
         # First check session cache for tabs imported in current run
-        session_key = (arc_tab_id, title, url)
+        session_key = (arc_tab_id, title, url, workspace_uuid)
         if session_key in self.imported_in_session:
             return True
 
@@ -185,43 +190,49 @@ class ZenPinnedTabImporter:
                 cursor = conn.cursor()
 
                 if arc_tab_id:
-                    # If we have Arc tab ID, first try precise duplicate detection
-                    cursor.execute("""
-                        SELECT COUNT(*) FROM zen_pins
-                        WHERE arc_tab_id = ?
-                    """, (arc_tab_id,))
+                    if workspace_uuid is not None:
+                        cursor.execute("""
+                            SELECT COUNT(*) FROM zen_pins
+                            WHERE arc_tab_id = ? AND workspace_uuid = ?
+                        """, (arc_tab_id, workspace_uuid))
+                    else:
+                        cursor.execute("""
+                            SELECT COUNT(*) FROM zen_pins
+                            WHERE arc_tab_id = ?
+                        """, (arc_tab_id,))
 
-                    result = cursor.fetchone()
-                    arc_id_count = result[0]
-
-                    # If Arc tab ID found exact matches, return True immediately
-                    if arc_id_count > 0:
+                    if cursor.fetchone()[0] > 0:
                         return True
 
-                    # Arc tab ID found no matches, fall back to title+URL detection
-                    # This catches legacy tabs imported without Arc tab IDs
-                    cursor.execute("""
-                        SELECT COUNT(*) FROM zen_pins
-                        WHERE title = ? AND url = ?
-                    """, (title, url))
+                    # Fall back to title+URL detection (catches legacy tabs
+                    # imported without arc_tab_id).
+                    if workspace_uuid is not None:
+                        cursor.execute("""
+                            SELECT COUNT(*) FROM zen_pins
+                            WHERE title = ? AND url = ? AND workspace_uuid = ?
+                        """, (title, url, workspace_uuid))
+                    else:
+                        cursor.execute("""
+                            SELECT COUNT(*) FROM zen_pins
+                            WHERE title = ? AND url = ?
+                        """, (title, url))
 
-                    result = cursor.fetchone()
-                    title_url_count = result[0]
-
-                    return title_url_count > 0
+                    return cursor.fetchone()[0] > 0
 
                 else:
-                    # Fallback for tabs without Arc tab ID: check by title and URL globally
-                    cursor.execute("""
-                        SELECT COUNT(*) FROM zen_pins
-                        WHERE title = ? AND url = ?
-                    """, (title, url))
+                    # No Arc tab ID: scope by workspace when provided.
+                    if workspace_uuid is not None:
+                        cursor.execute("""
+                            SELECT COUNT(*) FROM zen_pins
+                            WHERE title = ? AND url = ? AND workspace_uuid = ?
+                        """, (title, url, workspace_uuid))
+                    else:
+                        cursor.execute("""
+                            SELECT COUNT(*) FROM zen_pins
+                            WHERE title = ? AND url = ?
+                        """, (title, url))
 
-                    result = cursor.fetchone()
-                    count = result[0]
-
-
-                    return count > 0
+                    return cursor.fetchone()[0] > 0
 
         except Exception as e:
             logger.error(f"Failed to check if tab exists: {e}")
@@ -231,7 +242,7 @@ class ZenPinnedTabImporter:
         """Create a pinned tab in zen_pins."""
 
         # Check if tab already exists to prevent duplicates from multiple script runs
-        exists = self.tab_exists(tab.arc_tab_id, tab.title, tab.url)
+        exists = self.tab_exists(tab.arc_tab_id, tab.title, tab.url, tab.workspace_uuid)
 
         if exists:
             logger.info(f"    ⚠️ Skipping duplicate tab: {tab.title}")
@@ -260,7 +271,7 @@ class ZenPinnedTabImporter:
                 """, (tab.uuid, timestamp))
 
                 # Add to session cache to prevent duplicates within the same run
-                session_key = (tab.arc_tab_id, tab.title, tab.url)
+                session_key = (tab.arc_tab_id, tab.title, tab.url, tab.workspace_uuid)
                 self.imported_in_session.add(session_key)
 
                 conn.commit()

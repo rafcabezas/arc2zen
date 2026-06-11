@@ -11,23 +11,23 @@ Usage:
 
 import argparse
 import json
+import logging
+import os
 import subprocess
 import sys
 from pathlib import Path
 from typing import Optional
-import logging
-import os
 
 # Import our modules
 sys.path.append(str(Path(__file__).parent / "src"))
-from arc_pinned_tab_extractor import ArcPinnedTabExtractor
-from zen_schema_analyzer import ZenSchemaAnalyzer
-from zen_bookmark_importer import ZenBookmarkImporter
-from zen_space_importer import ZenSpaceImporter, ZenProfile
-from zen_pinned_tab_importer import ZenPinnedTabImporter
-from zen_workspace_importer import ZenWorkspaceImporter
-from zen_sessions_importer import ZenSessionsImporter
 from arc_history_migrator import ArcHistoryMigrator
+from arc_pinned_tab_extractor import ArcPinnedTabExtractor
+from zen_bookmark_importer import ZenBookmarkImporter
+from zen_pinned_tab_importer import ZenPinnedTabImporter
+from zen_schema_analyzer import ZenSchemaAnalyzer
+from zen_sessions_importer import ZenSessionsImporter
+from zen_space_importer import ZenProfile, ZenSpaceImporter
+from zen_workspace_importer import ZenWorkspaceImporter
 
 # Optional: Import sessionstore manager for open tabs (requires lz4)
 try:
@@ -112,7 +112,7 @@ class Arc2ZenMigrator:
 
         except Exception as e:
             # Ignore false windows file not found error
-            if not "WinError 2" in str(e):
+            if "WinError 2" not in str(e):
                 logger.warning(f"Could not check if browsers are running: {e}")
 
         return running_browsers, len(running_browsers) > 0
@@ -125,6 +125,8 @@ class Arc2ZenMigrator:
         import_open_tabs: bool = False,
         no_containers: bool = False,
         import_history: bool = False,
+        include_default_essentials: bool = False,
+        keep_root_tabs: bool = False,
     ) -> bool:
         """Run the complete Arc to Zen migration process."""
 
@@ -135,7 +137,8 @@ class Arc2ZenMigrator:
         logger.info(
             f"Options: dry_run={dry_run}, zen_profile={zen_profile_name}, "
             f"arc_space={arc_space_name}, import_open_tabs={import_open_tabs}, "
-            f"no_containers={no_containers}, import_history={import_history}"
+            f"no_containers={no_containers}, import_history={import_history}, "
+            f"include_default_essentials={include_default_essentials}, keep_root_tabs={keep_root_tabs}"
         )
 
         # Clean up any previous export file to prevent caching issues
@@ -158,7 +161,9 @@ class Arc2ZenMigrator:
         # Step 1: Extract Arc pinned tabs
         print("\n📌 Step 1: Extracting Arc pinned tabs...")
         arc_extractor = ArcPinnedTabExtractor()
-        all_arc_spaces = arc_extractor.extract_pinned_tabs()
+        all_arc_spaces = arc_extractor.extract_pinned_tabs(
+            skip_default_essentials=not include_default_essentials
+        )
 
         if not all_arc_spaces:
             print("❌ No Arc pinned tabs found! Make sure Arc browser is installed.")
@@ -193,6 +198,19 @@ class Arc2ZenMigrator:
         print(f"✅ Found {len(arc_spaces)} Arc space{'s' if len(arc_spaces) > 1 else ''} with {total_extracted} pinned tabs + {total_open_tabs} open tabs")
         for space in arc_spaces:
             print(f"  • {space.space_name}: {len(space.pinned_tabs)} pinned, {len(space.open_tabs)} open, {len(space.folders)} folders")
+
+        # Warn about arc:// URLs that will be filtered out
+        arc_urls = [
+            t for space in arc_spaces
+            for t in space.pinned_tabs
+            if t.url.startswith('arc://')
+        ]
+        if arc_urls:
+            print(f"\n⚠️  {len(arc_urls)} Arc-internal URL(s) will be skipped (arc:// links don't work in Zen):")
+            for t in arc_urls:
+                print(f"   ✗ {t.title} → {t.url}")
+
+
 
         print(f"\n📊 Total to migrate: {total_extracted} pinned tabs + {total_open_tabs} open tabs")
 
@@ -297,7 +315,11 @@ class Arc2ZenMigrator:
             # Zen 1.18+: Import spaces, pinned tabs, and folders into zen-sessions.jsonlz4
             print("\n📌 Step 4b: Importing pinned tabs and workspaces (modern format)...")
             sessions_importer = ZenSessionsImporter(selected_zen_profile)
-            sessions_success = sessions_importer.import_arc_data(arc_export_data, container_mappings, dry_run=dry_run)
+            sessions_success = sessions_importer.import_arc_data(
+                arc_export_data, container_mappings,
+                dry_run=dry_run,
+                drop_root_tabs=not keep_root_tabs,
+            )
             pinned_success = sessions_success
             workspace_success = sessions_success
         else:
@@ -375,10 +397,10 @@ class Arc2ZenMigrator:
                 print("💡 Run without --dry-run to perform actual migration.")
             else:
                 print("\n🎉 Migration completed successfully!")
-                print(f"📌 Your Arc pinned tabs are now in Zen as actual pinned tabs")
+                print("📌 Your Arc pinned tabs are now in Zen as actual pinned tabs")
                 print(f"🔄 Open tabs imported to Zen sessionstore ({total_open_tabs} tabs)")
                 print(f"🏗️ Created {len(arc_spaces)} Zen workspaces for your Arc spaces")
-                print(f"📁 Bookmarks also imported as backup under 'Unfiled Bookmarks'")
+                print("📁 Bookmarks also imported as backup under 'Unfiled Bookmarks'")
                 print(f" Migrated {total_extracted} pinned tabs + {total_open_tabs} open tabs")
 
             logger.info(f"Migration completed successfully. Bookmarks migrated: {total_extracted}")
@@ -466,6 +488,20 @@ Examples:
         help='Do not assign any container to tabs (container ID 0 - regular browsing). By default, separate containers are created for each Arc space. You can manually assign containers later in Zen.'
     )
 
+    parser.add_argument(
+        '--include-default-essentials',
+        action='store_true',
+        default=False,
+        help='Include Arc\'s Default-profile essential tabs (typically YouTube and Google Calendar) as Zen essentials. By default these are skipped.'
+    )
+
+    parser.add_argument(
+        '--keep-root-tabs',
+        action='store_true',
+        default=False,
+        help='Keep Arc pinned tabs that sit at the root of a space (no folder) as regular Zen pinned tabs. By default they are dropped to keep the sidebar clean (only essentials + folders are shown).'
+    )
+
     args = parser.parse_args()
 
     if args.verbose:
@@ -482,6 +518,8 @@ Examples:
             import_open_tabs=args.open_tabs,
             no_containers=args.no_containers,
             import_history=args.history,
+            include_default_essentials=args.include_default_essentials,
+            keep_root_tabs=args.keep_root_tabs,
         )
 
         if success and not args.dry_run:
