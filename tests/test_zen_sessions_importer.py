@@ -343,15 +343,18 @@ class TestRootTabFiltering:
             if not t.get("zenIsEmpty") and t.get("entries")
         }
 
-    def test_root_tabs_dropped_by_default(self, importer, empty_sessions):
-        urls = self._run(importer, drop_root_tabs=True)
-        assert "https://root.com" not in urls, "Root-level tab should be dropped by default"
+    def test_root_tabs_kept_by_default(self, importer, empty_sessions):
+        """Default behaviour: root-level tabs are imported (matches README 'Pinned Tabs → Zen Pinned Tabs')."""
+        urls = self._run(importer, drop_root_tabs=False)
+        assert "https://root.com" in urls, "Root-level tab must be kept by default"
         assert "https://essential.com" in urls
         assert "https://infolder.com" in urls
 
-    def test_root_tabs_kept_when_flag_false(self, importer, empty_sessions):
-        urls = self._run(importer, drop_root_tabs=False)
-        assert "https://root.com" in urls, "Root-level tab should be kept when drop_root_tabs=False"
+    def test_root_tabs_dropped_when_flag_true(self, importer, empty_sessions):
+        """opt-in --drop-root-tabs removes root-level tabs for a minimal sidebar."""
+        urls = self._run(importer, drop_root_tabs=True)
+        assert "https://root.com" not in urls, "Root-level tab should be dropped when drop_root_tabs=True"
+        assert "https://infolder.com" in urls, "Folder-contained tabs must not be dropped"
 
     def test_essential_tabs_never_dropped(self, importer, empty_sessions):
         """Essentials at root must always pass through regardless of drop_root_tabs."""

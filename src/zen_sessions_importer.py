@@ -203,14 +203,16 @@ class ZenSessionsImporter:
     # --- Core import logic ---
 
     def _process_space(self, space_data: dict, container_id: int = 0,
-                        drop_root_tabs: bool = True) -> Tuple[dict, List[dict], List[dict]]:
+                        drop_root_tabs: bool = False) -> Tuple[dict, List[dict], List[dict]]:
         """Process a single Arc space into Zen space, folders, and tabs.
 
         Args:
-            drop_root_tabs: When True (default), non-essential tabs that sit
-                at the root of a space (no folder) are not imported — they
-                would appear as loose pinned items between the essentials and
-                the folders in the Zen sidebar.  Set to False to keep them.
+            drop_root_tabs: When True, non-essential tabs that sit at the root
+                of a space (no folder) are skipped.  Default is False — all
+                pinned tabs are imported, matching the original Arc sidebar
+                structure where root-level tabs appear below the essentials.
+                Pass True (via --drop-root-tabs flag) for a cleaner sidebar
+                that shows only essentials + folders.
 
         Returns (space_dict, folders_list, tabs_list).
         """
@@ -459,18 +461,17 @@ class ZenSessionsImporter:
 
     def import_arc_data(self, arc_export_data: dict, container_mappings: dict,
                         dry_run: bool = False,
-                        drop_root_tabs: bool = True) -> bool:
+                        drop_root_tabs: bool = False) -> bool:
         """Import Arc spaces, pinned tabs, and folders into zen-sessions.jsonlz4.
 
         Args:
             arc_export_data:   Parsed Arc export JSON with 'spaces' array.
             container_mappings: Dict mapping space_name -> container userContextId.
             dry_run:           If True, log what would happen without writing.
-            drop_root_tabs:    When True (default), non-essential pinned tabs
-                               that sit at the root of a space (no folder) are
-                               skipped — they would appear as loose items in
-                               the Zen sidebar between essentials and folders.
-                               Set to False to keep them.
+            drop_root_tabs:    When False (default), all pinned tabs are imported
+                               preserving the Arc sidebar structure.  When True
+                               (via --drop-root-tabs flag), non-essential tabs
+                               without a folder are skipped for a minimal sidebar.
 
         Returns:
             True on success, False on failure.

@@ -126,7 +126,7 @@ class Arc2ZenMigrator:
         no_containers: bool = False,
         import_history: bool = False,
         include_default_essentials: bool = False,
-        keep_root_tabs: bool = False,
+        drop_root_tabs: bool = False,
     ) -> bool:
         """Run the complete Arc to Zen migration process."""
 
@@ -138,7 +138,7 @@ class Arc2ZenMigrator:
             f"Options: dry_run={dry_run}, zen_profile={zen_profile_name}, "
             f"arc_space={arc_space_name}, import_open_tabs={import_open_tabs}, "
             f"no_containers={no_containers}, import_history={import_history}, "
-            f"include_default_essentials={include_default_essentials}, keep_root_tabs={keep_root_tabs}"
+            f"include_default_essentials={include_default_essentials}, drop_root_tabs={drop_root_tabs}"
         )
 
         # Clean up any previous export file to prevent caching issues
@@ -318,7 +318,7 @@ class Arc2ZenMigrator:
             sessions_success = sessions_importer.import_arc_data(
                 arc_export_data, container_mappings,
                 dry_run=dry_run,
-                drop_root_tabs=not keep_root_tabs,
+                drop_root_tabs=drop_root_tabs,
             )
             pinned_success = sessions_success
             workspace_success = sessions_success
@@ -496,10 +496,12 @@ Examples:
     )
 
     parser.add_argument(
-        '--keep-root-tabs',
+        '--drop-root-tabs',
         action='store_true',
         default=False,
-        help='Keep Arc pinned tabs that sit at the root of a space (no folder) as regular Zen pinned tabs. By default they are dropped to keep the sidebar clean (only essentials + folders are shown).'
+        help='Drop Arc pinned tabs that sit at the root of a space (not inside any folder). '
+             'By default all pinned tabs are imported, matching the Arc sidebar structure. '
+             'Use this flag for a minimal sidebar showing only essentials + folders.'
     )
 
     args = parser.parse_args()
@@ -519,7 +521,7 @@ Examples:
             no_containers=args.no_containers,
             import_history=args.history,
             include_default_essentials=args.include_default_essentials,
-            keep_root_tabs=args.keep_root_tabs,
+            drop_root_tabs=args.drop_root_tabs,
         )
 
         if success and not args.dry_run:

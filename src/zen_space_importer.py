@@ -235,20 +235,31 @@ class ZenSpaceImporter:
             logger.info(f"  📦 Work container ID={work_id} · Personal container ID={personal_id}")
 
             # ── 2. Remove per-space containers from previous migration runs ──
-            # Those have a plain 'name' field matching an Arc space name and
-            # a userContextId > 5 (built-ins live at 1-4).
+            # Previous versions of this tool created one custom Firefox container
+            # per Arc space (IDs > 5 with a plain 'name' matching the space name).
+            # We only remove containers that are BOTH:
+            #   a) named after an Arc space (plain 'name' field, no 'l10nId')
+            #   b) have userContextId > 5 (built-ins 1-4 are always kept)
+            # This is conservative: it will NOT remove a user's manually-created
+            # container even if it shares a name with an Arc space, unless its ID
+            # is above 5 (which would only happen if it was created post-install,
+            # consistent with a previous migration run).
             arc_names_lower = {s['space_name'].lower() for s in arc_spaces}
             before = len(container_config['identities'])
             container_config['identities'] = [
                 c for c in container_config['identities']
                 if not (
-                    c.get('name', '').lower() in arc_names_lower
+                    # Has a plain name (not a built-in l10nId container)
+                    c.get('name') and not c.get('l10nId')
+                    # Name matches an Arc space
+                    and c['name'].lower() in arc_names_lower
+                    # ID above the standard built-in range
                     and c['userContextId'] > 5
                 )
             ]
             removed = before - len(container_config['identities'])
             if removed:
-                logger.info(f"  🧹 Removed {removed} obsolete per-space container(s)")
+                logger.info(f"  🧹 Removed {removed} obsolete per-space container(s) from previous migration runs")
                 max_uid = max(
                     (c['userContextId'] for c in container_config['identities']),
                     default=5
