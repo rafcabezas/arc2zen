@@ -458,11 +458,11 @@ class ArcPinnedTabExtractor:
                 i += 1
 
         # Create profile-to-space mapping for quick lookup
-        profile_to_space = {}
+        profile_to_spaces = {}
         for space_id, space_info in spaces_info.items():
             profile = space_info.get('profile')
             if profile:
-                profile_to_space[profile] = space_id
+                profile_to_spaces.setdefault(profile, []).append(space_id)
 
         # Look for topApps containers and map them to spaces
         for item_id, item_data in items_lookup.items():
@@ -485,15 +485,27 @@ class ArcPinnedTabExtractor:
                 # Get the children IDs for this topApps container first
                 children_ids = item_data.get('childrenIds', [])
 
-                # Find the corresponding space for this profile
-                target_space_id = profile_to_space.get(directory_basename, "orphaned")
-
-                # Debug: Show profile matching results
+                # A Chromium profile can back several Arc spaces. Match the
+                # Essential container's own URLs/titles first; profile is only
+                # safe when it names exactly one Arc space.
+                target_space_id = self._match_essential_container_to_space(
+                    children_ids, items_lookup, spaces_info
+                )
                 if target_space_id == "orphaned":
-                    logger.info(f"    📝 Profile '{directory_basename}' not found in profile_to_space mapping - trying intelligent assignment")
-                    target_space_id = self._assign_essential_tab_to_space(children_ids, items_lookup, spaces_info)
+                    candidates = profile_to_spaces.get(directory_basename, [])
+                    if len(candidates) == 1:
+                        target_space_id = candidates[0]
+                    elif directory_basename == "Default":
+                        target_space_id = next(
+                            (sid for sid, info in spaces_info.items()
+                             if info['name'].lower() == 'personal'),
+                            "orphaned",
+                        )
+
+                if target_space_id == "orphaned":
+                    logger.info(f"    📝 No unambiguous Arc space for profile '{directory_basename}'")
                 else:
-                    logger.info(f"    ✅ Profile '{directory_basename}' matched to space '{spaces_info.get(target_space_id, {}).get('name', target_space_id)}'")
+                    logger.info(f"    ✅ Essential container matched to '{spaces_info[target_space_id]['name']}'")
 
                 target_space_name = spaces_info.get(target_space_id, {}).get('name', 'Essential')
 
@@ -531,6 +543,22 @@ class ArcPinnedTabExtractor:
                             logger.info(f"    ⭐ Essential tab for {target_space_name}: {title}")
 
         return essential_tabs_by_space
+
+    def _match_essential_container_to_space(self, children_ids: List[str], items_lookup: Dict, spaces_info: Dict) -> str:
+        """Match an Essential container to its Arc space from its own content."""
+        content = " ".join(
+            f"{items_lookup.get(tab_id, {}).get('data', {}).get('tab', {}).get('savedURL', '')} "
+            f"{items_lookup.get(tab_id, {}).get('data', {}).get('tab', {}).get('savedTitle', '')}"
+            for tab_id in children_ids
+        ).lower()
+        scores = {}
+        for space_id, space_info in spaces_info.items():
+            name = space_info['name'].lower()
+            tokens = {name.replace(' ', ''), name.replace('3', 'three').replace(' ', '')}
+            score = sum(token in content for token in tokens if len(token) > 2)
+            if score:
+                scores[space_id] = score
+        return max(scores, key=scores.get) if scores else "orphaned"
 
     def _assign_essential_tab_to_space(self, children_ids: List[str], items_lookup: Dict, spaces_info: Dict) -> str:
         """Intelligently assign orphaned essential tabs to spaces based on URL patterns and content."""
