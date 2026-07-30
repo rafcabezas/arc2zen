@@ -341,6 +341,7 @@ def main():
         s = {'essential': 0, 'pinned': 0, 'open': 0, 'skipped': 0, 'folders': 0}
 
         # Build folder_name -> session folder_id mapping for this space
+        # Arc folders have a title; we generate a Zen-style folder ID for each
         now_ms = int(datetime.now().timestamp() * 1000)
         folder_id_map = {}  # Arc folder title -> session folder id
         for i, folder in enumerate(space.folders):
@@ -350,6 +351,7 @@ def main():
             # Figure out parent folder id (for nested folders)
             parent_folder_id = None
             if folder.parent_id:
+                # Find parent folder by matching Arc folder_id to title
                 for other in space.folders:
                     if other.folder_id == folder.parent_id:
                         parent_folder_id = folder_id_map.get(other.title)
