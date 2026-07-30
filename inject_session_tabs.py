@@ -341,7 +341,6 @@ def main():
         s = {'essential': 0, 'pinned': 0, 'open': 0, 'skipped': 0, 'folders': 0}
 
         # Build folder_name -> session folder_id mapping for this space
-        # Arc folders have a title; we generate a Zen-style folder ID for each
         now_ms = int(datetime.now().timestamp() * 1000)
         folder_id_map = {}  # Arc folder title -> session folder id
         for i, folder in enumerate(space.folders):
@@ -351,7 +350,6 @@ def main():
             # Figure out parent folder id (for nested folders)
             parent_folder_id = None
             if folder.parent_id:
-                # Find parent folder by matching Arc folder_id to title
                 for other in space.folders:
                     if other.folder_id == folder.parent_id:
                         parent_folder_id = folder_id_map.get(other.title)
@@ -403,6 +401,34 @@ def main():
             s['open'] += 1
 
         stats[space.space_name] = s
+
+    # 6b. Create placeholder about:blank tabs for empty folders.
+    # Zen requires at least one tab (even a placeholder) per folder to
+    # render it.  Folders that only contain sub-folders (no direct tabs)
+    # won't appear without this.
+    empty_folder_count = 0
+    used_group_ids = {t.get('groupId') for t in new_tabs if t.get('groupId')}
+    for folder in new_folders:
+        if folder['id'] not in used_group_ids:
+            now_ms = int(datetime.now().timestamp() * 1000)
+            placeholder_sync_id = f"{now_ms}-empty-{empty_folder_count}"
+            placeholder = make_session_tab(
+                url='about:blank',
+                title='',
+                workspace_uuid=folder['workspaceId'],
+                container_id=0,
+                pinned=True,
+                essential=False,
+                group_id=folder['id'],
+            )
+            placeholder['zenIsEmpty'] = True
+            placeholder['zenSyncId'] = placeholder_sync_id
+            new_tabs.append(placeholder)
+            folder['emptyTabIds'] = [placeholder_sync_id]
+            empty_folder_count += 1
+
+    if empty_folder_count:
+        print(f"  Added {empty_folder_count} placeholder tabs for empty folders")
 
     # 7. Summary
     print(f"\nInjection summary:")
