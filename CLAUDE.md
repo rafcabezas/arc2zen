@@ -19,6 +19,15 @@ python3 migrate_arc_to_zen.py --dry-run
 
 # Verbose logging for debugging
 python3 migrate_arc_to_zen.py --verbose
+
+# Inject Arc's open (unpinned) tabs — Zen must be fully quit
+# (writes BOTH zen-sessions.jsonlz4 and sessionstore.jsonlz4, zenSyncId-matched)
+python3 inject_open_tabs.py --dry-run
+python3 inject_open_tabs.py
+
+# Restore tabs Arc auto-archived (reason=auto) into their original workspaces
+python3 restore_auto_archived.py --dry-run
+python3 restore_auto_archived.py
 ```
 
 ### Component Testing
@@ -56,6 +65,14 @@ python3 src/zen_workspace_mapper.py
 - Preserves original sidebar ordering via global index tracking
 - Data classes: `ArcPinnedTab`, `ArcFolder`, `ArcSpace`
 
+**`inject_open_tabs.py`**
+
+- Injects Arc's open (unpinned) tabs as real tabs in the correct Zen workspace
+- Writes the SAME tab object (shared `zenSyncId`) to BOTH `zen-sessions.jsonlz4`
+  and `sessionstore.jsonlz4`/`recovery.jsonlz4` (see Critical insight below)
+- Maps Arc spaces to Zen workspaces by name; container id inferred from the
+  workspace's existing tabs; dedup, `--dry-run`, timestamped backups
+
 **Zen Importer Components:**
 
 - `zen_pinned_tab_importer.py` - Direct import to `zen_pins` table
@@ -84,7 +101,10 @@ Zen Profile/
 │   ├── zen_pins (pinned tab metadata — NOT used for rendering)
 │   ├── zen_workspaces (workspace definitions with icons/colors)
 │   └── moz_bookmarks (Firefox-style bookmarks backup)
-├── zen-sessions.jsonlz4 (SOURCE OF TRUTH for rendered tabs)
+├── zen-sessions.jsonlz4 (SOURCE OF TRUTH for rendered sidebar tabs)
+├── sessionstore.jsonlz4 (Firefox session; open tabs must ALSO live here,
+│   zenSyncId-matched with zen-sessions.jsonlz4 — Zen 1.20+)
+├── sessionstore-backups/recovery.jsonlz4 (same content while Zen runs)
 ├── containers.json (container/space definitions)
 └── prefs.js (active workspace preferences)
 ```
@@ -92,6 +112,12 @@ Zen Profile/
 > **Critical insight**: Zen renders sidebar tabs from `zen-sessions.jsonlz4`,
 > NOT from the `zen_pins` database table. The DB stores metadata only.
 > `inject_session_tabs.py` handles this key step.
+>
+> **Open (unpinned) tabs need BOTH session files** (Zen 1.20+): Zen keeps
+> `zen-sessions.jsonlz4` and `sessionstore.jsonlz4`/`recovery.jsonlz4` in
+> lockstep, matched per-tab by `zenSyncId`. On startup only tabs present in
+> BOTH files survive; orphans are pruned. `inject_open_tabs.py` handles this
+> by writing the same tab object (same `zenSyncId`) into both files.
 
 ## Important Implementation Details
 
