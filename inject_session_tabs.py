@@ -275,6 +275,8 @@ def main():
     )
     parser.add_argument('--dry-run', action='store_true',
                         help='Preview what would be injected without writing')
+    parser.add_argument('--no-open-tabs', action='store_true',
+                        help='Skip Arc open (unpinned) tabs, inject pinned tabs only')
     args = parser.parse_args()
 
     print("=" * 60)
@@ -353,11 +355,14 @@ def main():
     new_tabs = []
     new_folders = []
     new_groups = []
+    # Dedup per-workspace: the same URL pinned in two Arc spaces is legitimate
+    # and must appear in both Zen workspaces.
     seen_urls = set()
 
     for t in kept_tabs:
+        ws = t.get('zenWorkspace', '')
         for e in t.get('entries', []):
-            seen_urls.add(e.get('url', ''))
+            seen_urls.add((ws, e.get('url', '')))
 
     stats = {}
     total_folders_created = 0
@@ -405,10 +410,10 @@ def main():
 
         # Essential + pinned tabs (with folder assignment)
         for tab in space.pinned_tabs:
-            if tab.url in seen_urls:
+            if (ws_uuid, tab.url) in seen_urls:
                 s['skipped'] += 1
                 continue
-            seen_urls.add(tab.url)
+            seen_urls.add((ws_uuid, tab.url))
 
             # Resolve the tab's folder via Arc's parent_id UUID. Using
             # folder_path titles previously broke when siblings shared a name.
@@ -423,11 +428,11 @@ def main():
             s['essential' if tab.is_essential else 'pinned'] += 1
 
         # Open (unpinned) tabs
-        for tab in space.open_tabs:
-            if tab.url in seen_urls:
+        for tab in (space.open_tabs if not args.no_open_tabs else []):
+            if (ws_uuid, tab.url) in seen_urls:
                 s['skipped'] += 1
                 continue
-            seen_urls.add(tab.url)
+            seen_urls.add((ws_uuid, tab.url))
             new_tabs.append(make_session_tab(
                 url=tab.url, title=tab.title,
                 workspace_uuid=ws_uuid, container_id=cid,
