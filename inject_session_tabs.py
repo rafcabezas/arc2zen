@@ -233,6 +233,38 @@ def make_session_group(folder_id, name, pinned=True):
     }
 
 
+def make_session_placeholder_tab(workspace_uuid, group_id):
+    # Empty about:blank tab marking an otherwise-empty folder so Zen retains it.
+    # Zen prunes folders that contain no direct tabs on session load; without
+    # a placeholder, structural parent folders are dropped and their children
+    # are reparented to the workspace root (hierarchy flattens).
+    now_ms = int(datetime.now().timestamp() * 1000)
+    seq = int.from_bytes(os.urandom(4), 'big')
+    return {
+        "entries": [{
+            "url": "about:blank",
+            "triggeringPrincipal_base64": '{"3":{}}',
+        }],
+        "lastAccessed": now_ms,
+        "pinned": True,
+        "hidden": False,
+        "groupId": group_id,
+        "zenWorkspace": workspace_uuid,
+        "zenSyncId": f"arc2zen-ph-{seq}",
+        "zenEssential": False,
+        "zenDefaultUserContextId": None,
+        "zenPinnedIcon": None,
+        "zenIsEmpty": True,
+        "zenHasStaticIcon": False,
+        "zenGlanceId": None,
+        "zenIsGlance": False,
+        "searchMode": None,
+        "userContextId": 0,
+        "attributes": {},
+        "index": 1,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Main injection logic
 # ---------------------------------------------------------------------------
@@ -330,6 +362,13 @@ def main():
     stats = {}
     total_folders_created = 0
 
+    # Folder IDs must be globally unique across all workspaces. Compute the
+    # millisecond stamp once and use a single monotonically incrementing
+    # counter, otherwise spaces processed in the same millisecond collide
+    # (the per-space counter reset to 0) and Zen hangs on session load.
+    folder_id_stamp = int(datetime.now().timestamp() * 1000)
+    folder_seq = 0
+
     for space in arc_spaces:
         ws_info = ws_map.get(space.space_name)
         if not ws_info:
@@ -340,22 +379,18 @@ def main():
         cid = ws_info['container_id']
         s = {'essential': 0, 'pinned': 0, 'open': 0, 'skipped': 0, 'folders': 0}
 
-        # Build folder_name -> session folder_id mapping for this space
-        # Arc folders have a title; we generate a Zen-style folder ID for each
-        now_ms = int(datetime.now().timestamp() * 1000)
-        folder_id_map = {}  # Arc folder title -> session folder id
-        for i, folder in enumerate(space.folders):
-            folder_id = f"{now_ms}-{i}"
-            folder_id_map[folder.title] = folder_id
+        # Map Arc folder UUIDs to the session folder IDs we mint for them.
+        # Keying by Arc's stable folder_id (not folder title) avoids collisions
+        # when siblings share a name (e.g. multiple "Bookmarks" folders).
+        folder_id_map = {}
+        for folder in space.folders:
+            folder_id = f"{folder_id_stamp}-{folder_seq}"
+            folder_seq += 1
+            folder_id_map[folder.folder_id] = folder_id
 
-            # Figure out parent folder id (for nested folders)
-            parent_folder_id = None
-            if folder.parent_id:
-                # Find parent folder by matching Arc folder_id to title
-                for other in space.folders:
-                    if other.folder_id == folder.parent_id:
-                        parent_folder_id = folder_id_map.get(other.title)
-                        break
+            parent_folder_id = (
+                folder_id_map.get(folder.parent_id) if folder.parent_id else None
+            )
 
             new_folders.append(make_session_folder(
                 folder_id, folder.title, ws_uuid,
@@ -375,11 +410,9 @@ def main():
                 continue
             seen_urls.add(tab.url)
 
-            # If the tab has a folder_path, find its group_id
-            group_id = None
-            if tab.folder_path:
-                # Last element in folder_path is the immediate parent folder
-                group_id = folder_id_map.get(tab.folder_path[-1])
+            # Resolve the tab's folder via Arc's parent_id UUID. Using
+            # folder_path titles previously broke when siblings shared a name.
+            group_id = folder_id_map.get(tab.parent_id) if tab.parent_id else None
 
             new_tabs.append(make_session_tab(
                 url=tab.url, title=tab.title,
@@ -404,11 +437,30 @@ def main():
 
         stats[space.space_name] = s
 
+    # Add an empty placeholder tab to every folder that received no direct
+    # tabs. Zen drops folders with no direct tabs on session load, which
+    # orphans their children and flattens the hierarchy.
+    direct_tab_count = {}
+    for tab in new_tabs:
+        gid = tab.get('groupId')
+        if gid:
+            direct_tab_count[gid] = direct_tab_count.get(gid, 0) + 1
+
+    placeholders_added = 0
+    for folder in new_folders:
+        if direct_tab_count.get(folder['id'], 0) == 0:
+            new_tabs.append(make_session_placeholder_tab(
+                workspace_uuid=folder['workspaceId'],
+                group_id=folder['id'],
+            ))
+            placeholders_added += 1
+
     # 7. Summary
     print(f"\nInjection summary:")
     print(f"  Native Zen tabs kept: {len(kept_tabs)}")
     print(f"  New Arc tabs to inject: {len(new_tabs)}")
     print(f"  Folders to create: {total_folders_created}")
+    print(f"  Placeholder tabs for empty folders: {placeholders_added}")
     print(f"  Total session tabs: {len(kept_tabs) + len(new_tabs)}")
 
     print(f"\nPer-workspace breakdown:")
