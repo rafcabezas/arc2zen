@@ -1,5 +1,21 @@
 #!/usr/bin/env python3
-# Arc → Zen Session Tab Injector
+# ============================================================
+# DEPRECATED — DO NOT USE
+# ============================================================
+# This script was a standalone alternative to zen_sessions_importer.py
+# and is no longer required. It has NOT been updated with the following
+# fixes that are present in zen_sessions_importer.py:
+#
+#   - attributes field still set to {"zen-essential":"true"} (wrong, should be {})
+#   - zenDefaultUserContextId set to "true" for ALL tabs (wrong, essentials only)
+#   - Root-level Arc pinned tabs are NOT filtered (causes sidebar clutter)
+#   - No profile → Work/Personal container mapping
+#
+# Use migrate_arc_to_zen.py instead, which calls zen_sessions_importer.py
+# with all fixes applied.
+# ============================================================
+#
+# Arc → Zen Session Tab Injector (DEPRECATED)
 # Injects Arc tabs into zen-sessions.jsonlz4 as real browser tabs.
 # Zen renders sidebar tabs from this file, NOT from the zen_pins DB.
 # Re-running replaces previously-injected tabs (idempotent).
@@ -189,7 +205,7 @@ def make_session_tab(url, title, workspace_uuid, container_id,
         "zenLiveFolderItemId": None,
         "searchMode": None,
         "userContextId": container_id,
-        "attributes": {},
+        "attributes": {"zen-essential": "true"} if essential else {},
         "index": 1,
         "scroll": {"scroll": "0,0"},
         "storage": {},
@@ -270,6 +286,11 @@ def make_session_placeholder_tab(workspace_uuid, group_id):
 # ---------------------------------------------------------------------------
 
 def main():
+    print("\n❌ This script is DEPRECATED and should not be used.")
+    print("   Run migrate_arc_to_zen.py instead.")
+    print("   See the deprecation notice at the top of this file for details.\n")
+    sys.exit(1)
+
     parser = argparse.ArgumentParser(
         description="Inject Arc tabs into Zen's session file as real browser tabs",
     )
