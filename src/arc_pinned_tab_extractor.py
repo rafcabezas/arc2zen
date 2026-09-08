@@ -182,6 +182,27 @@ class ArcPinnedTabExtractor:
             else:
                 i += 1
 
+        # Local sidebar spaces are authoritative; sync cache may be empty or stale
+        logger.info(f"  ℹ️  spaces_info from sync cache: {len(spaces_info)} spaces")
+        for c in data.get('sidebar', {}).get('containers', []):
+            sp = c.get('spaces', [])
+            for j in range(len(sp) - 1):
+                if isinstance(sp[j], str) and isinstance(sp[j + 1], dict):
+                    sd = sp[j + 1]
+                    sid = sd.get('id') or sp[j]
+                    dirname = (sd.get('profile', {}).get('custom', {})
+                               .get('_0', {}).get('directoryBasename'))
+                    if sid not in spaces_info:
+                        ci = sd.get('customInfo', {})
+                        spaces_info[sid] = {
+                            'name': sd.get('title', f'Space {sid}'),
+                            'icon': ci.get('iconType', {}).get('emoji_v2'),
+                            'profile': None,
+                            'color': None,
+                        }
+                    spaces_info[sid]['profile'] = dirname or 'Default'
+                    logger.info(f"  👤 {spaces_info[sid]['name']} ({sid[:8]}) → {spaces_info[sid]['profile']} (local sidebar)")
+
         # Get all items from local sidebar
         containers = data.get('sidebar', {}).get('containers', [])
         if len(containers) > 1 and 'items' in containers[1]:
