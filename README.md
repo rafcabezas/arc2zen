@@ -38,6 +38,10 @@ python3 migrate_arc_to_zen.py
 
 # Then inject all tabs into the session file (makes tabs actually appear)
 python3 inject_session_tabs.py
+
+# Finally, inject Arc's open (unpinned) tabs (Zen 1.20+ keeps TWO session files)
+python3 inject_open_tabs.py --dry-run
+python3 inject_open_tabs.py
 ```
 
 ### Important: Session Tab Injection
@@ -53,6 +57,43 @@ python3 migrate_arc_to_zen.py --zen-profile "Default" --verbose
 This writes directly to `zen-sessions.jsonlz4`, which is the file Zen actually
 reads to render tabs. The script is idempotent — re-running it replaces
 previously-injected tabs with a fresh extraction.
+
+### Open (Unpinned) Tabs on Zen 1.20+: Dual-File Injection
+
+For open tabs, `zen-sessions.jsonlz4` alone is NOT enough. Zen keeps two
+session files in lockstep, matched per-tab by `zenSyncId`:
+
+1. `zen-sessions.jsonlz4` — Zen's workspace tab store (flat list)
+2. `sessionstore.jsonlz4` / `sessionstore-backups/recovery.jsonlz4` — the regular Firefox session
+
+On startup Zen effectively keeps the intersection: an open tab survives only
+if a tab with the same `zenSyncId` exists in BOTH files. Tabs written to only
+one file are silently pruned on the next restart.
+
+`inject_open_tabs.py` handles this: it appends the same tab object (same
+`zenSyncId`) to both files (plus `recovery.jsonlz4`), maps Arc spaces to Zen
+workspaces by name, infers the container id from the workspace's existing
+tabs, dedups against URLs already present in either file, and creates
+timestamped backups. Zen must be fully quit while it runs.
+
+```bash
+python3 inject_open_tabs.py --dry-run   # preview what would be injected
+python3 inject_open_tabs.py             # inject into both session files
+```
+
+### Restoring Arc's Auto-Archived Tabs (optional)
+
+Arc archives inactive tabs on a timer (12h/24h/7d/30d). `restore_auto_archived.py`
+restores ONLY the tabs Arc closed by itself — archive items in
+`StorableArchiveItems.json` with `reason == "auto"`. Tabs closed manually
+(`reason == "manual"`, e.g. Cmd+W) are deliberately ignored. Each tab returns
+to its original space (resolved via the archive item's `source.space` UUID) as
+a real open tab, using the same dual-file mechanism as `inject_open_tabs.py`.
+
+```bash
+python3 restore_auto_archived.py --dry-run
+python3 restore_auto_archived.py
+```
 
 ### Advanced Usage
 
@@ -118,6 +159,9 @@ For **Zen 1.18+**, spaces, pinned tabs, and folders are written directly to `zen
 ```
 arc2zen/
 ├── migrate_arc_to_zen.py              # Main migration script
+├── inject_session_tabs.py             # Inject pinned tabs/folders into zen-sessions.jsonlz4
+├── inject_open_tabs.py                # Inject open tabs into BOTH session files (Zen 1.20+)
+├── restore_auto_archived.py           # Restore Arc auto-archived tabs (reason=auto)
 ├── requirements.txt                   # Python dependencies (lz4)
 ├── src/
 │   ├── arc_pinned_tab_extractor.py    # Extract Arc pinned tabs
@@ -279,6 +323,9 @@ If anything goes wrong:
 - **Format**: Firefox-based
 - **Key Files**:
   - `zen-sessions.jsonlz4` (Zen 1.18+: spaces, pinned tabs, folders)
+  - `sessionstore.jsonlz4` + `sessionstore-backups/recovery.jsonlz4` (Firefox
+    session; on Zen 1.20+ open tabs must also exist here with a matching
+    `zenSyncId` — see "Dual-File Injection" above)
   - `places.sqlite` (bookmarks database)
   - `containers.json` (workspace container definitions)
   - `prefs.js` (preferences)

@@ -7,13 +7,11 @@ as pinned tabs in the correct spaces, not as bookmarks.
 """
 
 import json
-import uuid
 import logging
-from pathlib import Path
-from typing import List, Dict, Optional
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from zen_pinned_tab_importer import ZenPinnedTabImporter
+from pathlib import Path
+from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -160,7 +158,7 @@ class ZenSpaceImporter:
         try:
             with open(self.containers_file, 'w') as f:
                 json.dump(container_config, f, separators=(',', ':'))
-            logger.info(f"✅ Updated containers.json")
+            logger.info("✅ Updated containers.json")
             return True
         except Exception as e:
             logger.error(f"Failed to save containers: {e}")
@@ -203,51 +201,137 @@ class ZenSpaceImporter:
             return False
 
     def import_arc_spaces_as_containers(self, arc_export_data: Dict, dry_run: bool = False) -> Dict[str, int]:
-        """Import Arc spaces as Zen containers."""
+        """Map Arc spaces to the built-in Work / Personal Firefox containers.
+
+        All spaces from the work profile (Profile 1) are mapped to the
+        built-in 'Work' container.  Spaces from the personal profile
+        (Profile 2) are mapped to the built-in 'Personal' container.
+        No new custom containers are created.
+
+        Also removes any per-space containers created by previous migration
+        runs (those whose name matches an Arc space name).
+        """
         try:
             arc_spaces = arc_export_data.get('spaces', [])
             if not arc_spaces:
                 logger.warning("No Arc spaces found in export data")
-                return False
+                return {}
 
-            logger.info(f"🔧 Creating Zen containers for {len(arc_spaces)} Arc spaces...")
+            logger.info(f"🔧 Mapping {len(arc_spaces)} Arc spaces to Firefox containers...")
 
-            if dry_run:
+            # ── 1. Find the built-in Work / Personal container IDs ──────────
+            container_config = self.load_existing_containers()
+            work_id     = 2  # Firefox default
+            personal_id = 1  # Firefox default
+
+            for identity in container_config.get('identities', []):
+                l10n = identity.get('l10nId', '')
+                uid  = identity['userContextId']
+                if 'work' in l10n:
+                    work_id = uid
+                elif 'personal' in l10n:
+                    personal_id = uid
+
+            logger.info(f"  📦 Work container ID={work_id} · Personal container ID={personal_id}")
+
+            # ── 2. Remove per-space containers from previous migration runs ──
+            # Previous versions of this tool created one custom Firefox container
+            # per Arc space (IDs > 5 with a plain 'name' matching the space name).
+            # We only remove containers that are BOTH:
+            #   a) named after an Arc space (plain 'name' field, no 'l10nId')
+            #   b) have userContextId > 5 (built-ins 1-4 are always kept)
+            # This is conservative: it will NOT remove a user's manually-created
+            # container even if it shares a name with an Arc space, unless its ID
+            # is above 5 (which would only happen if it was created post-install,
+            # consistent with a previous migration run).
+            arc_names_lower = {s['space_name'].lower() for s in arc_spaces}
+            before = len(container_config['identities'])
+            container_config['identities'] = [
+                c for c in container_config['identities']
+                if not (
+                    # Has a plain name (not a built-in l10nId container)
+                    c.get('name') and not c.get('l10nId')
+                    # Name matches an Arc space
+                    and c['name'].lower() in arc_names_lower
+                    # ID above the standard built-in range
+                    and c['userContextId'] > 5
+                )
+            ]
+            removed = before - len(container_config['identities'])
+            if removed:
+                logger.info(f"  🧹 Removed {removed} obsolete per-space container(s) from previous migration runs")
+                max_uid = max(
+                    (c['userContextId'] for c in container_config['identities']),
+                    default=5
+                )
+                container_config['lastUserContextId'] = max_uid
+
+            if not dry_run:
+                self.save_containers(container_config)
+            else:
+                # Dry run: report what would be mapped, but write nothing
                 logger.info("🧪 DRY RUN - No actual changes will be made")
 
-                for space in arc_spaces:
-                    space_name = space['space_name']
-                    tab_count = len(space.get('pinned_tabs', []))
-                    logger.info(f"  📁 Would create container: {space_name} ({tab_count} pinned tabs)")
-                # Return empty dict for dry run
-                return {}
+            # ── 3. Build the space → container mapping ───────────────────────
+            # A space is mapped to the Personal container when ANY of these is true:
+            #   a) Its name contains 'personal' (case-insensitive)  — most common
+            #   b) No space has 'personal' in the name AND there are multiple distinct
+            #      Arc profiles — in that case the highest-numbered profile is the
+            #      personal one (Arc convention: Default/Profile 1 = work,
+            #      Profile 2 = personal).
+            # If there is only one distinct profile, ALL spaces go to Work.
 
-            # Create containers for spaces
-            space_to_container = self.create_containers_for_spaces(arc_spaces)
+            distinct_profiles = {s.get('profile', '') for s in arc_spaces}
+            has_personal_name  = any('personal' in s['space_name'].lower() for s in arc_spaces)
+            multiple_profiles  = len(distinct_profiles) > 1
 
-            if not space_to_container:
-                logger.error("Failed to create any containers")
-                return {}
+            # Find the highest-numbered Arc profile for the fallback heuristic
+            profile_numbers = {}
+            for space in arc_spaces:
+                p = space.get('profile', '')
+                if p and p.startswith('Profile '):
+                    try:
+                        profile_numbers[p] = int(p.split()[-1])
+                    except ValueError:
+                        pass
+            last_profile = max(profile_numbers, key=profile_numbers.get) if profile_numbers else None
 
-            # Update workspace preferences
-            # Generate a UUID for the active workspace (first space)
-            if arc_spaces:
-                active_uuid = str(uuid.uuid4())
-                self.update_prefs_for_workspaces(active_uuid)
+            container_mappings: Dict[str, int] = {}
+            for space in arc_spaces:
+                space_name = space['space_name']
+                profile    = space.get('profile')
 
-            logger.info(f"✅ Successfully created {len(space_to_container)} Zen containers")
+                is_personal = (
+                    'personal' in space_name.lower()
+                    or (
+                        not has_personal_name
+                        and multiple_profiles
+                        and last_profile
+                        and profile == last_profile
+                    )
+                )
 
-            # Log the mapping
-            for space_name, container_id in space_to_container.items():
-                logger.info(f"  📁 {space_name} -> Container ID {container_id}")
+                if is_personal:
+                    cid   = personal_id
+                    label = 'Personal'
+                else:
+                    cid   = work_id
+                    label = 'Work'
 
-            # Create a workspaces.json guide file for the user
-            self.create_workspaces_guide(space_to_container, arc_spaces)
+                container_mappings[space_name] = cid
+                logger.info(f"  ✅ {space_name} (Arc profile: {profile!r}) → {label} (ID {cid})")
 
-            return space_to_container
+            if not dry_run:
+                self.update_prefs_for_workspaces()
+                self.create_workspaces_guide(container_mappings, arc_spaces)
+                logger.info(f"✅ Successfully mapped {len(container_mappings)} spaces")
+                return container_mappings
+
+            # dry_run returns empty dict — no data written, caller must not use the result
+            return {}
 
         except Exception as e:
-            logger.error(f"Failed to import Arc spaces as containers: {e}")
+            logger.error(f"Failed to map Arc spaces to containers: {e}")
             return {}
 
     def create_workspaces_guide(self, space_to_container: Dict[str, int], arc_spaces: List) -> None:

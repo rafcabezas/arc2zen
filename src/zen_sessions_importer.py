@@ -10,14 +10,14 @@ Format: mozlz4 (8-byte magic + 4-byte LE size + lz4 block compressed JSON)
 """
 
 import json
-import struct
-import uuid
-import time
-import shutil
 import logging
+import shutil
+import struct
+import time
+import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
-from datetime import datetime
 
 try:
     import lz4.block
@@ -107,7 +107,7 @@ class ZenSessionsImporter:
 
     # --- Build structures ---
 
-    def _build_space(self, space_data: dict) -> dict:
+    def _build_space(self, space_data: dict, container_id: int = 0) -> dict:
         return {
             "uuid": self._generate_space_uuid(),
             "name": space_data["space_name"],
@@ -117,26 +117,46 @@ class ZenSessionsImporter:
                 "opacity": 0.5,
                 "texture": 0,
             },
-            "containerTabId": 0,
+            "containerTabId": container_id,
             "hasCollapsedPinnedTabs": False,
         }
 
     def _build_tab(self, tab_data: dict, workspace_uuid: str,
-                   index: int, folder_id: Optional[str] = None) -> dict:
+                   index: int, folder_id: Optional[str] = None,
+                   container_id: int = 0) -> dict:
+        import random
         url = tab_data.get("url", "")
         title = tab_data.get("title", "")
         is_essential = tab_data.get("is_essential", False)
         timestamp_ms = int(time.time() * 1000)
 
+        # Generate doc IDs that match Zen's internal format
+        doc_id = random.randint(1, 0xFFFFFFFF)
+        docshell_uuid = "{" + str(uuid.uuid4()) + "}"
+        sync_id = f"{timestamp_ms}-{doc_id}"
+
         tab = {
-            "entries": [{"url": url, "title": title}],
+            "entries": [{
+                "url": url,
+                "title": title,
+                "cacheKey": 0,
+                "ID": doc_id,
+                "docshellUUID": docshell_uuid,
+                "originalURI": url,
+                "resultPrincipalURI": None,
+                "hasUserInteraction": False,
+                "triggeringPrincipal_base64": "{\"3\":{}}",
+                "docIdentifier": doc_id,
+                "transient": False,
+            }],
             "lastAccessed": timestamp_ms,
             "pinned": True,
             "hidden": False,
             "zenWorkspace": workspace_uuid,
-            "zenSyncId": self._generate_sync_id(),
+            "zenSyncId": sync_id,
             "zenEssential": is_essential,
-            "zenDefaultUserContextId": None,
+            # Zen uses string "true" (not boolean) for this field on essentials
+            "zenDefaultUserContextId": "true" if is_essential else None,
             "zenPinnedIcon": None,
             "zenIsEmpty": False,
             "zenHasStaticIcon": False,
@@ -146,10 +166,17 @@ class ZenSessionsImporter:
                 "entry": {"url": url, "title": title},
                 "image": None,
             },
+            "zenLiveFolderItemId": None,
             "searchMode": None,
-            "userContextId": 0,
+            "userContextId": container_id,
+            # attributes is always empty — Zen checks zenEssential field, not attributes
             "attributes": {},
             "index": index,
+            "scroll": {"scroll": "0,0"},
+            "storage": {},
+            "userTypedValue": "",
+            "userTypedClear": 0,
+            "image": None,
         }
 
         if folder_id:
@@ -175,12 +202,21 @@ class ZenSessionsImporter:
 
     # --- Core import logic ---
 
-    def _process_space(self, space_data: dict) -> Tuple[dict, List[dict], List[dict]]:
+    def _process_space(self, space_data: dict, container_id: int = 0,
+                        drop_root_tabs: bool = False) -> Tuple[dict, List[dict], List[dict]]:
         """Process a single Arc space into Zen space, folders, and tabs.
+
+        Args:
+            drop_root_tabs: When True, non-essential tabs that sit at the root
+                of a space (no folder) are skipped.  Default is False — all
+                pinned tabs are imported, matching the original Arc sidebar
+                structure where root-level tabs appear below the essentials.
+                Pass True (via --drop-root-tabs flag) for a cleaner sidebar
+                that shows only essentials + folders.
 
         Returns (space_dict, folders_list, tabs_list).
         """
-        space = self._build_space(space_data)
+        space = self._build_space(space_data, container_id)
         workspace_uuid = space["uuid"]
 
         # Build folders with hierarchy
@@ -229,9 +265,24 @@ class ZenSessionsImporter:
             if not url:
                 continue
 
+            is_essential = tab_data.get("is_essential", False)
+            folder_path = tab_data.get("folder_path", [])
+            url = tab_data.get("url", "")
+
+            # Skip Arc-internal URLs — they don't work in Zen (or any non-Arc browser)
+            if url.startswith("arc://"):
+                logger.info(f"    ⚠️  Skipping Arc-internal URL: {url}")
+                continue
+
+            # Root-level non-essential tabs (no folder) are skipped by default
+            # because they appear as loose pinned items in the Zen sidebar,
+            # cluttering it between the essentials and the folders.
+            # Pass drop_root_tabs=False to _process_space to keep them.
+            if not is_essential and not folder_path and drop_root_tabs:
+                continue
+
             # Resolve folder assignment
             folder_id = None
-            folder_path = tab_data.get("folder_path", [])
             if folder_path:
                 # Use the immediate parent folder (last element in path)
                 immediate_parent = folder_path[-1]
@@ -240,7 +291,8 @@ class ZenSessionsImporter:
             zen_tab = self._build_tab(
                 tab_data, workspace_uuid,
                 index=i + 1, folder_id=folder_id,
-            )
+                container_id=container_id,
+            )  # note: drop_root_tabs guard already applied above
             zen_tabs.append(zen_tab)
 
         # Create about:blank placeholder tab per folder — Zen requires this for validation
@@ -273,48 +325,67 @@ class ZenSessionsImporter:
         return space, zen_folders, zen_tabs
 
     def _merge_with_existing(self, existing: dict, new_spaces: List[dict],
-                             new_tabs: List[dict], new_folders: List[dict]) -> dict:
-        """Merge imported data with existing zen-sessions data."""
-        existing_space_names = {s["name"] for s in existing.get("spaces", [])}
+                             new_tabs: List[dict], new_folders: List[dict],
+                             arc_space_names: set) -> dict:
+        """Merge imported data with existing zen-sessions data.
 
-        spaces_to_add = []
-        skipped_space_uuids = set()
-        for space in new_spaces:
-            if space["name"] in existing_space_names:
-                logger.info(f"  Skipping existing space: {space['name']}")
-                skipped_space_uuids.add(space["uuid"])
-            else:
-                spaces_to_add.append(space)
+        Strategy:
+        - Remove any previously migrated Arc spaces (matched by name) and all
+          their tabs/folders — this clears stale UUIDs from old runs.
+        - Also remove any orphaned tabs whose zenWorkspace UUID doesn't exist
+          in the remaining spaces array.
+        - Add the freshly built Arc spaces, tabs and folders.
+        - Preserve all non-Arc spaces and their tabs/folders untouched.
+        """
+        existing_spaces = existing.get("spaces", [])
+        existing_tabs   = existing.get("tabs", [])
+        existing_folders = existing.get("folders", [])
 
-        # Filter out tabs/folders belonging to skipped spaces
-        tabs_to_add = [t for t in new_tabs if t["zenWorkspace"] not in skipped_space_uuids]
-        folders_to_add = [f for f in new_folders if f["workspaceId"] not in skipped_space_uuids]
+        # --- 1. Remove previously migrated Arc spaces by name ---
+        kept_spaces = [s for s in existing_spaces if s["name"] not in arc_space_names]
+        removed_uuids = {s["uuid"] for s in existing_spaces if s["name"] in arc_space_names}
 
+        if removed_uuids:
+            logger.info(f"  🧹 Replacing {len(removed_uuids)} previously migrated Arc space(s) with fresh data")
+
+        # --- 2. Remove orphaned tabs (workspace UUID not in any kept space) ---
+        kept_space_uuids = {s["uuid"] for s in kept_spaces}
+        clean_tabs = [
+            t for t in existing_tabs
+            if t.get("zenWorkspace") in kept_space_uuids
+        ]
+        orphaned = len(existing_tabs) - len(clean_tabs)
+        if orphaned:
+            logger.info(f"  🧹 Removed {orphaned} orphaned tab(s) whose workspace no longer exists")
+
+        clean_folders = [
+            f for f in existing_folders
+            if f.get("workspaceId") in kept_space_uuids
+        ]
+
+        # --- 3. Merge ---
         merged = dict(existing)
-        merged["spaces"] = existing.get("spaces", []) + spaces_to_add
-        merged["tabs"] = existing.get("tabs", []) + tabs_to_add
-        merged["folders"] = existing.get("folders", []) + folders_to_add
+        merged["spaces"]        = kept_spaces + new_spaces
+        merged["tabs"]          = clean_tabs  + new_tabs
+        merged["folders"]       = clean_folders + new_folders
         merged["splitViewData"] = existing.get("splitViewData", [])
         merged["lastCollected"] = int(time.time() * 1000)
 
-        # Build groups array from ALL folders — Zen injects sidebar.groups into
-        # the sessionstore initialState so Firefox creates tab-group DOM elements.
-        # Without matching groups, gZenFolders.restoreDataFromSessionStore() can't
-        # find the DOM elements by ID and silently skips all folders.
-        all_groups = list(existing.get("groups", []))
-        existing_group_ids = {g["id"] for g in all_groups}
-        for folder in folders_to_add:
-            if folder["id"] not in existing_group_ids:
-                all_groups.append({
-                    "pinned": True,
-                    "splitView": False,
-                    "id": folder["id"],
-                    "name": folder["name"],
-                    "color": "zen-workspace-color",
-                    "collapsed": folder.get("collapsed", False),
-                    "saveOnWindowClose": True,
-                })
-        merged["groups"] = all_groups
+        # Build groups array from ALL folders
+        existing_groups = [
+            g for g in existing.get("groups", [])
+            if g["id"] not in {f["id"] for f in existing_folders}  # drop old Arc groups
+        ]
+        new_groups = [{
+            "pinned": True,
+            "splitView": False,
+            "id": folder["id"],
+            "name": folder["name"],
+            "color": "zen-workspace-color",
+            "collapsed": folder.get("collapsed", False),
+            "saveOnWindowClose": True,
+        } for folder in new_folders]
+        merged["groups"] = existing_groups + new_groups
 
         return merged
 
@@ -363,16 +434,18 @@ class ZenSessionsImporter:
             # Update every window (open and closed)
             for win_list_key in ("windows", "_closedWindows"):
                 for win in ss_data.get(win_list_key, []):
-                    # Replace pinned tabs with zen-sessions tabs (ensures consistent zenSyncId + groupId)
-                    unpinned = [t for t in win.get("tabs", []) if not t.get("pinned")]
-                    win["tabs"] = list(merged.get("tabs", [])) + unpinned
-
-                    # Replace groups with folder groups
-                    win["groups"] = list(folder_groups)
-
-                    # Also sync folders and spaces into window data
-                    win["folders"] = list(merged.get("folders", []))
-                    win["spaces"] = list(merged.get("spaces", []))
+                    # IMPORTANT: do NOT touch win["tabs"] — that is the user's
+                    # open browsing session. Replacing it with pinned tabs from
+                    # all workspaces is what caused all 66 essential icons to
+                    # flood the sidebar at once.
+                    #
+                    # zen-sessions.jsonlz4 is the authoritative source for
+                    # workspace pinned tabs; Zen injects them on startup via
+                    # restoreWindowData(). We only need to sync the group/folder
+                    # structure so Firefox can create tab-group DOM elements.
+                    win["groups"]        = list(folder_groups)
+                    win["folders"]       = list(merged.get("folders", []))
+                    win["spaces"]        = list(merged.get("spaces", []))
                     win["splitViewData"] = list(merged.get("splitViewData", []))
 
                     updated = True
@@ -380,20 +453,25 @@ class ZenSessionsImporter:
             if updated:
                 try:
                     write_mozlz4(ss_path, ss_data)
-                    logger.info(f"  Synced {len(merged['tabs'])} tabs + {len(folder_groups)} groups to {ss_path.name}")
+                    logger.info(f"  Synced {len(folder_groups)} groups/folders/spaces to {ss_path.name}")
                 except Exception as e:
                     logger.warning(f"  Could not sync to {ss_path.name}: {e}")
 
     # --- Public API ---
 
     def import_arc_data(self, arc_export_data: dict, container_mappings: dict,
-                        dry_run: bool = False) -> bool:
+                        dry_run: bool = False,
+                        drop_root_tabs: bool = False) -> bool:
         """Import Arc spaces, pinned tabs, and folders into zen-sessions.jsonlz4.
 
         Args:
-            arc_export_data: Parsed Arc export JSON with 'spaces' array.
+            arc_export_data:   Parsed Arc export JSON with 'spaces' array.
             container_mappings: Dict mapping space_name -> container userContextId.
-            dry_run: If True, log what would happen without writing.
+            dry_run:           If True, log what would happen without writing.
+            drop_root_tabs:    When False (default), all pinned tabs are imported
+                               preserving the Arc sidebar structure.  When True
+                               (via --drop-root-tabs flag), non-essential tabs
+                               without a folder are skipped for a minimal sidebar.
 
         Returns:
             True on success, False on failure.
@@ -407,14 +485,16 @@ class ZenSessionsImporter:
 
             for space_data in arc_export_data.get("spaces", []):
                 space_name = space_data["space_name"]
+                container_id = container_mappings.get(space_name, 0)
 
-                space, folders, tabs = self._process_space(space_data)
+                space, folders, tabs = self._process_space(space_data, container_id,
+                                                            drop_root_tabs=drop_root_tabs)
                 all_new_spaces.append(space)
                 all_new_folders.extend(folders)
                 all_new_tabs.extend(tabs)
 
                 logger.info(
-                    f"  {space_name}: {len(tabs)} pinned tabs, "
+                    f"  {space_name} (container {container_id}): {len(tabs)} pinned tabs, "
                     f"{len(folders)} folders -> workspace {space['uuid']}"
                 )
 
@@ -429,10 +509,13 @@ class ZenSessionsImporter:
             if not self._backup_sessions():
                 logger.warning("Could not backup zen-sessions.jsonlz4, continuing anyway...")
 
+            # Collect Arc space names so _merge_with_existing can remove stale entries
+            arc_space_names = {s["name"] for s in all_new_spaces}
+
             # Read existing and merge
             existing = self._read_existing()
             merged = self._merge_with_existing(
-                existing, all_new_spaces, all_new_tabs, all_new_folders
+                existing, all_new_spaces, all_new_tabs, all_new_folders, arc_space_names
             )
 
             # Write

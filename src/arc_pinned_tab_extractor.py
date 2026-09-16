@@ -7,12 +7,12 @@ This provides the actual user-organized pinned tabs, not browsing history.
 """
 
 import json
-from pathlib import Path
-from typing import List, Dict, Optional, Any
-from dataclasses import dataclass, asdict
-from datetime import datetime, timezone
 import logging
 import os
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Dict, List, Optional
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -68,6 +68,7 @@ class ArcSpace:
     open_tabs: List[ArcOpenTab]
     icon: Optional[str] = None
     color: Optional[dict] = None
+    profile: Optional[str] = None  # Arc profile name e.g. 'Default', 'Profile 1', 'Profile 2'
 
     def __str__(self):
         icon_str = f" ({self.icon})" if self.icon else ""
@@ -85,7 +86,16 @@ class ArcPinnedTabExtractor:
             self.home_dir = Path.home()
             self.arc_sidebar_file = self.home_dir / "Library/Application Support/Arc/StorableSidebar.json"
 
-    def extract_pinned_tabs(self) -> List[ArcSpace]:
+    def extract_pinned_tabs(self, skip_default_essentials: bool = True) -> List[ArcSpace]:
+        """Extract all pinned tabs organised by spaces.
+
+        Args:
+            skip_default_essentials: When True (default), tabs from the Arc
+                'Default' profile topApps container (typically YouTube and
+                Google Calendar) are not imported as Zen essentials.  Set to
+                False to include them.
+        """
+        self.skip_default_essentials = skip_default_essentials
         """Extract all pinned tabs organized by spaces with folder structure."""
         if not self.arc_sidebar_file.exists():
             logger.error(f"Arc StorableSidebar.json not found: {self.arc_sidebar_file}")
@@ -221,13 +231,9 @@ class ArcPinnedTabExtractor:
                     item_data = items[i + 1]
 
                     # Check which space this item belongs to
-                    item_title = item_data.get('title', 'Untitled')
-                    found_space = False
-
                     for space_id, space_info in spaces_info.items():
                         space_name = space_info['name']
                         if self._item_belongs_to_space(item_id, space_id, items_lookup, data):
-                            found_space = True
                             data_section = item_data.get('data', {})
 
 
@@ -351,7 +357,7 @@ class ArcPinnedTabExtractor:
 
                             # Start recursive processing with top-level display order
                             process_items_recursive(display_order)
-                            
+
                             # Also extract unpinned (open) tabs
                             unpinned_order = self._get_unpinned_tab_order(space_id, items_lookup, data)
                             open_tabs = []
@@ -387,7 +393,8 @@ class ArcPinnedTabExtractor:
 
                         logger.info(f"  ✅ {space_name}: {len(pinned_tabs)} pinned tabs, {len(open_tabs)} open tabs, {len(folders)} folders")
                         space_color = space_info.get('color')
-                        arc_spaces.append(ArcSpace(space_id, space_name, pinned_tabs, folders, open_tabs, space_icon, space_color))
+                        space_profile = space_info.get('profile')
+                        arc_spaces.append(ArcSpace(space_id, space_name, pinned_tabs, folders, open_tabs, space_icon, space_color, space_profile))
             else:
                 # Fallback to original method if sidebar spaces not found
                 for space_id, space_info in spaces_info.items():
@@ -402,7 +409,8 @@ class ArcPinnedTabExtractor:
                     folders.sort(key=lambda folder: folder.index)
                     logger.info(f"  ✅ {space_name}: {len(pinned_tabs)} pinned tabs, {len(open_tabs)} open tabs, {len(folders)} folders")
                     space_color = space_info.get('color')
-                    arc_spaces.append(ArcSpace(space_id, space_name, pinned_tabs, folders, open_tabs, space_icon, space_color))
+                    space_profile = space_info.get('profile')
+                    arc_spaces.append(ArcSpace(space_id, space_name, pinned_tabs, folders, open_tabs, space_icon, space_color, space_profile))
 
         # Extract Essential tabs and distribute them to their appropriate workspaces
         essential_tabs_by_space = self._extract_essential_tabs_distributed(data, spaces_info)
@@ -457,12 +465,17 @@ class ArcPinnedTabExtractor:
             else:
                 i += 1
 
-        # Create profile-to-space mapping for quick lookup
-        profile_to_space = {}
+        # Map each profile to the FIRST space that uses it.
+        # Arc replicates essentials to every space in a profile, but in Zen
+        # each workspace is independent, so we assign to the primary space only.
+        # The 'Default' profile is included — callers can filter it via
+        # skip_default_essentials if they don't want YouTube / Google Calendar.
+        profile_to_space: Dict[str, str] = {}
         for space_id, space_info in spaces_info.items():
             profile = space_info.get('profile')
-            if profile:
+            if profile and profile not in profile_to_space:
                 profile_to_space[profile] = space_id
+                logger.info(f"    📌 Profile '{profile}' → space '{space_info['name']}' (primary)")
 
         # Look for topApps containers and map them to spaces
         for item_id, item_data in items_lookup.items():
@@ -482,50 +495,56 @@ class ArcPinnedTabExtractor:
                 elif 'default' in topapps_data:
                     directory_basename = "Default"
 
-                # Get the children IDs for this topApps container first
+                # Get the children IDs for this topApps container
                 children_ids = item_data.get('childrenIds', [])
 
-                # Find the corresponding space for this profile
-                target_space_id = profile_to_space.get(directory_basename, "orphaned")
+                # The Default profile is skipped by default (YouTube / Google
+                # Calendar) but kept if the caller sets skip_default_essentials
+                # to False.  Other users may want those tabs.
+                if directory_basename == 'Default' and self.skip_default_essentials:
+                    logger.info("    ⏭️  Skipping Default profile essentials (use --include-default-essentials to import them)")
+                    continue
 
-                # Debug: Show profile matching results
-                if target_space_id == "orphaned":
-                    logger.info(f"    📝 Profile '{directory_basename}' not found in profile_to_space mapping - trying intelligent assignment")
-                    target_space_id = self._assign_essential_tab_to_space(children_ids, items_lookup, spaces_info)
+                # Assign to the single primary space for this profile.
+                target_space_id = profile_to_space.get(directory_basename)
+
+                if not target_space_id:
+                    if directory_basename == 'Default' and spaces_info:
+                        # Default profile has no explicit space owner — it appeared
+                        # in ALL Arc spaces globally, so assign to the first space.
+                        target_space_id = next(iter(spaces_info))
+                        logger.info(f"    ℹ️  Default profile → assigning to first space '{spaces_info[target_space_id]['name']}' (global essentials)")
+                    else:
+                        logger.info(f"    📝 Profile '{directory_basename}' not in profile_to_space — trying intelligent assignment")
+                        target_space_id = self._assign_essential_tab_to_space(children_ids, items_lookup, spaces_info)
                 else:
-                    logger.info(f"    ✅ Profile '{directory_basename}' matched to space '{spaces_info.get(target_space_id, {}).get('name', target_space_id)}'")
+                    logger.info(f"    ✅ Profile '{directory_basename}' → space '{spaces_info[target_space_id]['name']}'")
 
                 target_space_name = spaces_info.get(target_space_id, {}).get('name', 'Essential')
 
-                # Process each Essential tab in this container
                 for idx, tab_id in enumerate(children_ids):
                     tab_data = items_lookup.get(tab_id, {})
                     tab_info = tab_data.get('data', {}).get('tab', {})
 
                     if tab_info and tab_info.get('savedURL'):
-                        # Extract tab information
                         url = tab_info.get('savedURL', '')
                         title = tab_info.get('savedTitle', url)
 
-                        # Create ArcPinnedTab for Essential tab
                         essential_tab = ArcPinnedTab(
                             url=url,
                             title=title,
                             space_id=target_space_id,
                             space_name=target_space_name,
-                            folder_path=[],  # Essential tabs go to root of workspace
+                            folder_path=[],
                             tab_id=tab_id,
-                            parent_id=item_id,  # Parent is the topApps container
+                            parent_id=item_id,
                             index=idx,
-                            is_essential=True  # Mark as Essential tab
+                            is_essential=True
                         )
 
-                        # Add to the appropriate space
-                        if target_space_id not in essential_tabs_by_space:
-                            essential_tabs_by_space[target_space_id] = []
-                        essential_tabs_by_space[target_space_id].append(essential_tab)
+                        essential_tabs_by_space.setdefault(target_space_id, []).append(essential_tab)
 
-                        if target_space_id == "orphaned":
+                        if target_space_id == 'orphaned':
                             logger.info(f"    📦 Orphaned Essential tab: {title} (Profile: {directory_basename})")
                         else:
                             logger.info(f"    ⭐ Essential tab for {target_space_name}: {title}")
@@ -558,7 +577,7 @@ class ArcPinnedTabExtractor:
                     debug_content.append(f"Title: {title}")
 
         # Debug: Show what content we're analyzing
-        logger.info(f"    🔍 Analyzing orphaned essential tabs content:")
+        logger.info("    🔍 Analyzing orphaned essential tabs content:")
         for content in debug_content[:5]:  # Show first 5 entries
             logger.info(f"      - {content}")
         if len(debug_content) > 5:
@@ -572,46 +591,22 @@ class ArcPinnedTabExtractor:
             space_name = space_info['name'].lower()
             score = 0
 
-            # Special patterns for known spaces with higher confidence
-            if space_name == 'remoterlabs':
-                remoter_patterns = ['@remoterlabs.com', 'github.com/remoterlabs', 'remoterlabs/']
-                for pattern in remoter_patterns:
-                    score += sum(1 for content in tab_urls + tab_titles if pattern in content) * 3
-                # Lower weight for general 'remoter' matches
-                score += sum(1 for content in tab_urls + tab_titles if 'remoterlabs' in content and '@remoterlabs.com' not in content)
-
-            elif space_name == 'gavelmatch.com':
-                gavel_patterns = ['gavelmatch.com', 'gavelmatch.lovable.com']
-                for pattern in gavel_patterns:
-                    score += sum(1 for content in tab_urls + tab_titles if pattern in content) * 3
-                # Lower weight for general lovable matches
-                score += sum(1 for content in tab_urls + tab_titles if 'gavelmatch' in content and 'gavelmatch.com' not in content)
-
-            elif space_name == 'willowtree':
-                # Be very conservative with WillowTree - only assign from legitimate containers
-                # Don't do intelligent assignment for WillowTree to avoid cross-profile contamination
-                score = 0  # Disable intelligent assignment for WillowTree entirely
-
-            else:
-                # For other spaces, use exact space name matching in URLs (not titles to avoid false positives)
-                score += sum(1 for url in tab_urls if space_name in url)
+            # Generic: match space name against URLs (exact, lowercase)
+            # This works for any space whose name appears in the URLs of its tabs.
+            score += sum(1 for url in tab_urls if space_name in url)
 
             if score > 0:
                 space_scores[space_id] = score
 
-        # Return the space with the highest score, but only if it's a strong match
+        # Return the space with the highest score (minimum 1 — at least one URL match)
         if space_scores:
             best_space_id = max(space_scores.keys(), key=lambda s: space_scores[s])
             best_score = space_scores[best_space_id]
             best_space_name = spaces_info[best_space_id]['name']
 
-            # Be much more conservative - only assign if there's a very strong, unambiguous match
-            # Require a minimum score of 4 to avoid false positives from cross-profile contamination
-            if best_score >= 4:
-                logger.info(f"    🎯 Assigning essential tabs to '{best_space_name}' (strong match, score: {best_score})")
+            if best_score >= 1:
+                logger.info(f"    🎯 Assigning essential tabs to '{best_space_name}' (score: {best_score})")
                 return best_space_id
-            else:
-                logger.info(f"    🔒 Score {best_score} too low for '{best_space_name}' - keeping orphaned to avoid cross-profile contamination")
 
         # No intelligent match found
         return "orphaned"
@@ -713,14 +708,14 @@ class ArcPinnedTabExtractor:
 
     def _get_space_display_order(self, space_id: str, items_lookup: Dict, data: Dict) -> List[str]:
         """Get the display order of items in a space using container childrenIds.
-        
+
         The containerIDs array contains markers ('pinned', 'unpinned') followed by
         their respective container UUIDs. The order of markers can vary, so we
         identify containers by which marker immediately precedes them.
         """
         space_container_ids = self._get_space_container_ids(space_id, data)
         if not space_container_ids:
-            logger.debug(f"      ⚠️  No container IDs, returning empty display order")
+            logger.debug("      ⚠️  No container IDs, returning empty display order")
             return []
 
         containers = data.get('sidebar', {}).get('containers', [])
@@ -1011,6 +1006,7 @@ class ArcPinnedTabExtractor:
                     'space_name': space.space_name,
                     'icon': space.icon,
                     'color': space.color,
+                    'profile': space.profile,
                     'total_pinned_tabs': len(space.pinned_tabs),
                     'total_open_tabs': len(space.open_tabs),
                     'total_folders': len(space.folders),
@@ -1072,13 +1068,13 @@ def main():
     if success:
         summary = extractor.get_extraction_summary(arc_spaces)
 
-        print(f"\n📊 Extraction Summary:")
+        print("\n📊 Extraction Summary:")
         print(f"  Total spaces: {summary['total_spaces']}")
         print(f"  Total pinned tabs: {summary['total_pinned_tabs']}")
         print(f"  Total folders: {summary['total_folders']}")
         print(f"\n💾 Exported to: {output_file.absolute()}")
 
-        print(f"\n📋 Per-space breakdown:")
+        print("\n📋 Per-space breakdown:")
         for space_info in summary['spaces_summary']:
             print(f"  • {space_info['name']}: {space_info['pinned_tabs']} tabs, {space_info['folders']} folders")
 
