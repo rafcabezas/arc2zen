@@ -281,6 +281,15 @@ def make_session_placeholder_tab(workspace_uuid, group_id):
     }
 
 
+def add_session_placeholder_tab(tabs, folder):
+    placeholder = make_session_placeholder_tab(
+        workspace_uuid=folder['workspaceId'],
+        group_id=folder['id'],
+    )
+    tabs.append(placeholder)
+    folder['emptyTabIds'] = [placeholder['zenSyncId']]
+
+
 # ---------------------------------------------------------------------------
 # Main injection logic
 # ---------------------------------------------------------------------------
@@ -475,10 +484,7 @@ def main():
     placeholders_added = 0
     for folder in new_folders:
         if direct_tab_count.get(folder['id'], 0) == 0:
-            new_tabs.append(make_session_placeholder_tab(
-                workspace_uuid=folder['workspaceId'],
-                group_id=folder['id'],
-            ))
+            add_session_placeholder_tab(new_tabs, folder)
             placeholders_added += 1
 
     # 7. Summary
