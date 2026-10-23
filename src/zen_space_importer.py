@@ -15,6 +15,12 @@ from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
+# Firefox reserves the highest userContextId (UINT32_MAX) for its internal
+# "userContextIdInternal.webextStorageLocal" identity. Once containers.json's
+# lastUserContextId reaches it, ContextualIdentityService.create() refuses to
+# create any new container.
+MAX_USER_CONTEXT_ID = 0xFFFFFFFF
+
 def find_zen_profile() -> Path:
     """Find the active Zen profile directory."""
     profiles_dir = Path("~/Library/Application Support/zen/Profiles").expanduser()
@@ -260,11 +266,18 @@ class ZenSpaceImporter:
             removed = before - len(container_config['identities'])
             if removed:
                 logger.info(f"  🧹 Removed {removed} obsolete per-space container(s) from previous migration runs")
-                max_uid = max(
-                    (c['userContextId'] for c in container_config['identities']),
+            # lastUserContextId is deliberately left as-is, like Firefox's own
+            # ContextualIdentityService.remove(): lowering it would let Firefox hand a
+            # removed container's id to the next new container. Only repair a counter
+            # that earlier versions of this tool set to the reserved internal id.
+            if container_config.get('lastUserContextId', 0) >= MAX_USER_CONTEXT_ID:
+                container_config['lastUserContextId'] = max(
+                    (c['userContextId'] for c in container_config['identities']
+                     if c['userContextId'] < MAX_USER_CONTEXT_ID),
                     default=5
                 )
-                container_config['lastUserContextId'] = max_uid
+                logger.info("  🔧 Repaired containers.json lastUserContextId "
+                            "(was Firefox's reserved internal id)")
 
             if not dry_run:
                 self.save_containers(container_config)

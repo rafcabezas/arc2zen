@@ -4,6 +4,7 @@ Tests for zen_space_importer.py
 Covers:
   Bug 5  — No longer creates per-space custom containers; uses Work/Personal
   Fix    — Stale per-space containers cleaned from containers.json on re-run
+  Fix    — Cleanup never moves lastUserContextId onto Firefox's reserved id
   Fix    — Smart container heuristic (name + profile-order fallback)
 """
 import json
@@ -33,11 +34,15 @@ BUILTIN_CONTAINERS = [
 ]
 
 
-def _make_containers_file(path: Path, extra: Optional[List] = None) -> None:
+def _make_containers_file(
+    path: Path, extra: Optional[List] = None, last_user_context_id: Optional[int] = None
+) -> None:
     identities = list(BUILTIN_CONTAINERS)
     if extra:
         identities.extend(extra)
-    data = {"version": 5, "lastUserContextId": max(c["userContextId"] for c in identities), "identities": identities}
+    if last_user_context_id is None:
+        last_user_context_id = max(c["userContextId"] for c in identities)
+    data = {"version": 5, "lastUserContextId": last_user_context_id, "identities": identities}
     with open(path, "w") as f:
         json.dump(data, f)
 
@@ -144,6 +149,59 @@ class TestStaleContainerCleanup:
         ids = {c["userContextId"] for c in containers["identities"]}
         for builtin_id in (1, 2, 3, 4):
             assert builtin_id in ids, f"Built-in container ID {builtin_id} must not be removed"
+
+
+# ---------------------------------------------------------------------------
+# Fix — lastUserContextId stays usable after cleanup
+# ---------------------------------------------------------------------------
+
+# Firefox's own internal identities, present in every real containers.json.
+# "webextStorageLocal" is pinned to UINT32_MAX, the highest valid userContextId.
+FIREFOX_INTERNAL_CONTAINERS = [
+    {"icon": "", "color": "", "public": False, "userContextId": 5,
+     "name": "userContextIdInternal.thumbnail"},
+    {"icon": "", "color": "", "public": False, "userContextId": 4294967295,
+     "name": "userContextIdInternal.webextStorageLocal"},
+]
+
+
+class TestLastUserContextId:
+    def _run(self, tmp_path, extra, last_user_context_id):
+        from zen_space_importer import ZenProfile, ZenSpaceImporter
+        _make_containers_file(tmp_path / "containers.json",
+                              extra=FIREFOX_INTERNAL_CONTAINERS + extra,
+                              last_user_context_id=last_user_context_id)
+        (tmp_path / "prefs.js").write_text("")
+        importer = ZenSpaceImporter(ZenProfile(name="Default", path=tmp_path))
+        importer.import_arc_spaces_as_containers(make_arc_export([
+            make_arc_space_data("Workspace"),
+            make_arc_space_data("AI Projects"),
+        ]))
+        return _load_containers(tmp_path / "containers.json")
+
+    def test_cleanup_keeps_last_user_context_id(self, tmp_path):
+        """Removing stale containers must not move lastUserContextId.
+
+        Setting it to UINT32_MAX (the internal webextStorageLocal id) makes Firefox
+        refuse to create any new container; lowering it would let Firefox reuse a
+        removed container's id.
+        """
+        stale = [
+            {"icon": "fingerprint", "color": "blue", "public": True,
+             "userContextId": 6, "name": "Workspace"},
+            {"icon": "briefcase", "color": "turquoise", "public": True,
+             "userContextId": 9, "name": "AI Projects"},
+        ]
+        containers = self._run(tmp_path, stale, last_user_context_id=9)
+        assert [c["userContextId"] for c in containers["identities"]] == [1, 2, 3, 4, 5, 4294967295]
+        assert containers["lastUserContextId"] == 9
+
+    def test_repairs_last_user_context_id_stuck_at_reserved_id(self, tmp_path):
+        """A counter left at UINT32_MAX by an earlier run is reset to the highest real id."""
+        kept = [{"icon": "tree", "color": "green", "public": True,
+                 "userContextId": 7, "name": "Hobbies"}]
+        containers = self._run(tmp_path, kept, last_user_context_id=4294967295)
+        assert containers["lastUserContextId"] == 7
 
 
 # ---------------------------------------------------------------------------
