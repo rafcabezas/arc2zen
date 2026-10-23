@@ -162,6 +162,7 @@ arc2zen/
 ├── inject_session_tabs.py             # Inject pinned tabs/folders into zen-sessions.jsonlz4
 ├── inject_open_tabs.py                # Inject open tabs into BOTH session files (Zen 1.20+)
 ├── restore_auto_archived.py           # Restore Arc auto-archived tabs (reason=auto)
+├── sync_arc_to_zen.py                 # Optional mirror mode for Zen 1.22 (see Mirror Mode)
 ├── requirements.txt                   # Python dependencies (lz4)
 ├── src/
 │   ├── arc_pinned_tab_extractor.py    # Extract Arc pinned tabs
@@ -209,6 +210,33 @@ python3 src/zen_schema_analyzer.py
 # Import pinned tabs to Zen (advanced usage)
 python3 src/zen_pinned_tab_importer.py --dry-run
 ```
+
+## 🪞 Mirror Mode: `sync_arc_to_zen.py` (optional; Zen 1.22, macOS)
+
+A one-command alternative to the steps above, for Zen 1.22 on macOS. What it adds:
+
+- tab favicons from Arc's cache
+- one Zen container per Arc profile, with that profile's Favorites as its Essentials. Spaces from your default Arc profile keep the container their matched Zen workspace already uses, or none.
+- pinned tabs, folders, Essentials and open tabs in one run (`--no-open-tabs` skips open tabs)
+- safe re-runs: every tab and folder it creates gets a stable id (`arc2zen-<32 hex>`, folders `arc2zen-f-<32 hex>`), and later runs only replace those. If you changed synced items in Zen since the last sync (moved, renamed, closed or reordered them, or added your own pinned tabs or Essentials in a synced workspace or container), it lists the changes and stops; `--overwrite-zen-changes` goes ahead anyway.
+- `--extensions`: installs the Firefox versions of the Arc extensions it recognizes, from addons.mozilla.org, checked against AMO's checksum. Zen lists them as disabled until you click **Enable** in `about:addons`, and their settings don't carry over.
+
+```bash
+python3 sync_arc_to_zen.py            # dry run: prints the plan, writes nothing
+python3 sync_arc_to_zen.py --apply    # quit Zen (Cmd+Q) first
+python3 sync_arc_to_zen.py --help     # all options
+```
+
+Unlike the other scripts it only writes with `--apply`. It writes `zen-sessions.jsonlz4`, `containers.json` and `arc2zen-sync.json` (a record of the sync) in the Zen profile, backs each one up next to it first, and prints how to undo the run. With `--extensions` it also adds `<id>.xpi` files to the profile's `extensions` folder (remove those add-ons in `about:addons`). It never writes `places.sqlite`, `prefs.js` or `user.js`, and refuses `--apply` while Zen is running.
+
+Good to know:
+
+- An Arc space goes into the Zen workspace named by `--map`, else (first sync only) the one with the same name, else a new one. A matched workspace takes the Arc space's icon (its emoji, or its named icon when Zen has one with that name) and, if needed, that Arc profile's container; the plan flags a container change, since the workspace's sites lose that container's logins. Arc's color is only applied to workspaces that don't have one yet. On the first sync Arc's workspaces go first, and your own tabs, folders and Essentials are kept after Arc's (`--replace-existing` drops them instead). Workspaces and containers it creates are never removed.
+- Don't combine it with `migrate_arc_to_zen.py` on the same profile: that script's container cleanup can delete a container named like an Arc space, including one mirror mode created.
+- Built for Zen 1.22's session format and checked only against it; it warns when the profile was last opened by another Zen version. Zen 1.22 restores open tabs from `zen-sessions.jsonlz4` alone while `zen.window-sync.enabled` is on (the default; see `ZenSessionManager#restoreWindowData`), so the dual-file step above isn't needed there.
+- No history, bookmarks, logins or cookies: `migrate_arc_to_zen.py` handles history and bookmarks, and you'll sign in to sites again.
+
+Why a separate script: `ArcPinnedTabExtractor` gives each Arc profile's Favorites to one space (and skips the default profile's unless asked), while mirror mode keeps them per profile and also needs Arc's favicon cache and profile names. Reading Arc directly left the existing pipeline unchanged. Its tests use synthetic data only: `python3 -m pytest tests/test_sync.py`.
 
 ## ⚙️ Configuration
 

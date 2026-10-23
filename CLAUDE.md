@@ -73,6 +73,10 @@ python3 src/zen_workspace_mapper.py
 - Maps Arc spaces to Zen workspaces by name; container id inferred from the
   workspace's existing tabs; dedup, `--dry-run`, timestamped backups
 
+**`sync_arc_to_zen.py`**
+
+- Optional, self-contained mirror mode for Zen 1.22 on macOS (doesn't import `src/`); dry run unless `--apply`; tests in `tests/test_sync.py`
+
 **Zen Importer Components:**
 
 - `zen_pinned_tab_importer.py` - Direct import to `zen_pins` table
