@@ -39,6 +39,16 @@ class ZenResetter:
         print(f"Profile: {zen_profile.name}")
         print()
 
+        # zen_profile is already a Path object
+        profile_path = zen_profile if isinstance(zen_profile, Path) else zen_profile.path
+        db_path = profile_path / "places.sqlite"
+
+        # Zen 1.18+ keeps workspaces, pinned tabs, folders and essentials in
+        # zen-sessions.jsonlz4, which this tool does not reset.
+        sessions_kept = (profile_path / "zen-sessions.jsonlz4").exists()
+        sessions_note = ("zen-sessions.jsonlz4 is NOT reset: Zen 1.18+ keeps workspaces, "
+                         "pinned tabs, folders and essentials there, so they stay in the sidebar")
+
         if dry_run:
             print("🧪 DRY RUN MODE - Showing what would be reset\n")
         else:
@@ -50,16 +60,14 @@ class ZenResetter:
             print("   • All bookmarks")
             print("   • All browsing history")
             print("   • All preferences")
+            if sessions_kept:
+                print(f"⚠️  {sessions_note}.")
             print()
             response = input("Are you ABSOLUTELY sure? Type 'RESET' to continue: ")
             if response != 'RESET':
                 print("❌ Reset cancelled")
                 return False
             print()
-
-        # zen_profile is already a Path object
-        profile_path = zen_profile if isinstance(zen_profile, Path) else zen_profile.path
-        db_path = profile_path / "places.sqlite"
 
         if not db_path.exists():
             print(f"❌ Database not found: {db_path}")
@@ -81,6 +89,8 @@ class ZenResetter:
             print(f"  • containers.json (workspaces/containers)")
             print(f"  • prefs.js (preferences)")
             print(f"  • .parentlock (if exists)")
+            if sessions_kept:
+                print(f"  ⚠️  {sessions_note}")
             print()
             print("🧪 Dry run complete. Run without --dry-run to perform reset.")
             return True
@@ -113,15 +123,28 @@ class ZenResetter:
             conn = sqlite3.connect(db_path)
             cursor = conn.cursor()
 
+            # Zen 1.18+ keeps pins and workspaces in zen-sessions.jsonlz4, so newer
+            # profiles may not have the zen_pins / zen_workspaces tables at all.
+
             # Remove all pinned tabs
-            cursor.execute("DELETE FROM zen_pins")
-            pins_removed = cursor.rowcount
-            print(f"  ✅ Removed {pins_removed} pinned tabs")
+            try:
+                cursor.execute("DELETE FROM zen_pins")
+                pins_removed = cursor.rowcount
+                print(f"  ✅ Removed {pins_removed} pinned tabs")
+            except sqlite3.OperationalError as e:
+                if "no such table" not in str(e):
+                    raise
+                print("  ℹ️  No 'zen_pins' table found, skipping pinned tabs removal")
 
             # Remove all workspaces except Default
-            cursor.execute("DELETE FROM zen_workspaces WHERE name != 'Default'")
-            workspaces_removed = cursor.rowcount
-            print(f"  ✅ Removed {workspaces_removed} workspaces")
+            try:
+                cursor.execute("DELETE FROM zen_workspaces WHERE name != 'Default'")
+                workspaces_removed = cursor.rowcount
+                print(f"  ✅ Removed {workspaces_removed} workspaces")
+            except sqlite3.OperationalError as e:
+                if "no such table" not in str(e):
+                    raise
+                print("  ℹ️  No 'zen_workspaces' table found, skipping workspaces removal")
 
             # Remove ALL bookmarks (complete reset)
             cursor.execute("DELETE FROM moz_bookmarks WHERE id > 5")  # Keep root folders only
@@ -173,7 +196,11 @@ class ZenResetter:
 
             print()
             print("✅ Profile reset completed successfully!")
-            print("💡 The profile is now in a fresh state")
+            if sessions_kept:
+                print(f"⚠️  {sessions_note}, and their workspaces may refer to containers "
+                      "that were just removed from containers.json.")
+            else:
+                print("💡 The profile is now in a fresh state")
             print("💡 You can now run the migration again")
             return True
 
