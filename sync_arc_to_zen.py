@@ -507,7 +507,9 @@ class ArcData:
                               "children": self._tree(children)})
             elif "splitView" in data:
                 split = data["splitView"] if isinstance(data["splitView"], dict) else {}
-                panes = [n for n in self._tree(children) if n["kind"] == "tab"]
+                inner = self._tree(children)
+                panes = [n for n in inner if n["kind"] == "tab"]
+                others = [n for n in inner if n["kind"] != "tab"]   # not expected; kept
                 if len(panes) >= 2:
                     # Zen drops a split view of more than MAX_SPLIT_PANES on restore
                     shown = panes[:MAX_SPLIT_PANES]
@@ -515,9 +517,9 @@ class ArcData:
                     nodes.append({"kind": "split", "id": cid, "children": shown,
                                   "direction": "column" if vertical else "row",
                                   "sizes": split_sizes(split, shown)})
-                    nodes.extend(panes[MAX_SPLIT_PANES:])
+                    nodes.extend(panes[MAX_SPLIT_PANES:] + others)
                 else:
-                    nodes.extend(panes)           # a one-pane split is just a tab
+                    nodes.extend(inner)           # a one-pane split is just a tab
             elif "tab" in data:
                 tab = data["tab"] if isinstance(data["tab"], dict) else {}
                 url = tab.get("savedURL")
@@ -1101,7 +1103,10 @@ class SessionBuilder:
         })
         old = self.old_splits.get(split_id)
         if old and old.get("tabs") == tab_ids and isinstance(old.get("layoutTree"), dict):
-            self.splits.append(copy.deepcopy(old))    # same panes: keep sizes set in Zen
+            # Same panes: Zen's layout wins, so resizing in Zen survives a
+            # re-sync (Zen re-saves only its own fields, so whether Arc's
+            # sizes changed since the last sync can't be told apart)
+            self.splits.append(copy.deepcopy(old))
         else:
             # Always with a layoutTree: Zen 1.22/1.23 rebuilds a split without
             # one, but then returns from its restore loop, dropping every
@@ -1790,7 +1795,10 @@ def build_session(plan: Plan, arc: ArcData, session: dict, state: dict | None,
                 bump(sec, "folders kept dup")
         kept_folders.append(folder)
 
-    folder_ids = new_folder_ids | {f.get("id") for f in kept_folders}
+    # Real folders keep their group even when empty; a split view's group
+    # (and its splitViewGroup entry) only while some of its tabs are kept
+    folder_ids = {f.get("id") for f in builder.folders + kept_folders
+                  if not f.get("splitViewGroup")}
     other_group_ids = {t.get("groupId") for t in kept_tabs if isinstance(t, dict)} - folder_ids
     # A synced split view whose tabs are kept (open tabs on a --no-open-tabs
     # run) keeps its group; a synced folder's group is always rebuilt
@@ -1829,9 +1837,10 @@ def build_session(plan: Plan, arc: ArcData, session: dict, state: dict | None,
 
     session["spaces"] = spaces
     session["tabs"] = builder.tabs + kept_tabs
-    session["folders"] = builder.folders + kept_folders
-    session["groups"] = builder.groups + kept_groups
     live_groups = new_group_ids | {g.get("id") for g in kept_groups}
+    session["folders"] = builder.folders + [f for f in kept_folders if not f.get("splitViewGroup")
+                                            or f.get("id") in live_groups]
+    session["groups"] = builder.groups + kept_groups
     session["splitViewData"] = builder.splits + [
         e for e in session.get("splitViewData") or []
         if isinstance(e, dict) and e.get("groupId") in live_groups - new_group_ids]

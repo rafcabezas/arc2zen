@@ -218,7 +218,7 @@ A one-command alternative to the steps above, for Zen 1.22 on macOS. What it add
 - tab favicons from Arc's cache
 - one Zen container per Arc profile, with that profile's Favorites as its Essentials. Spaces from your default Arc profile keep the container their matched Zen workspace already uses, or none.
 - pinned tabs, folders, Essentials and open tabs in one run (`--no-open-tabs` skips open tabs)
-- split views, pinned or open and inside folders too, side by side or stacked, with Arc's pane sizes. Zen allows 2 to 4 panes: a one-pane Arc split becomes a plain tab, and panes past the fourth follow the split as plain tabs. Panes you resize in Zen keep their sizes on later runs.
+- split views, pinned or open and inside folders too, side by side or stacked, with Arc's pane sizes. Zen allows 2 to 4 panes: a one-pane Arc split becomes a plain tab, and panes past the fourth follow the split as plain tabs. On later runs a split whose panes are unchanged keeps its layout from Zen, so resizing it in Zen sticks (and size or orientation changes made in Arc after the first sync are not applied).
 - safe re-runs: every tab and folder it creates gets a stable id (`arc2zen-<32 hex>`, folders `arc2zen-f-<32 hex>`), and later runs only replace those. If you changed synced items in Zen since the last sync (moved, renamed, closed or reordered them, or added your own pinned tabs or Essentials in a synced workspace or container), it lists the changes and stops; `--overwrite-zen-changes` goes ahead anyway.
 - `--extensions`: installs the Firefox versions of the Arc extensions it recognizes, from addons.mozilla.org, checked against AMO's checksum. Zen lists them as disabled until you click **Enable** in `about:addons`, and their settings don't carry over.
 

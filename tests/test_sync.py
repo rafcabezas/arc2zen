@@ -1278,6 +1278,52 @@ class TestSplitViews(SyncTestCase):
         self.assertIn("1700000000000-5", {g["id"] for g in after["groups"]})
 
 
+    def test_users_split_of_synced_tabs_is_cleaned_up_on_overwrite(self):
+        # Two synced tabs put in a split view inside a synced folder, then
+        # reset to Arc's layout: no group, folder entry or layout is left
+        # behind without tabs
+        s = copy.deepcopy(self.s)
+        gid = "1700000000000-77"
+        tabs = [t for t in s["tabs"] if t["entries"][0]["url"] in (url("t-jira"),
+                                                                   url("t-after"))]
+        for t in tabs:
+            t["groupId"] = gid
+        s["groups"].append({"pinned": True, "splitView": True, "id": gid, "name": "",
+                            "color": "", "collapsed": False, "saveOnWindowClose": True})
+        s["folders"].append({"pinned": True, "splitViewGroup": True, "id": gid, "name": "",
+                             "parentId": S.folder_sync_id("f-ticket"),
+                             "prevSiblingInfo": {"type": "start", "id": None},
+                             "emptyTabIds": [], "workspaceId": self.ws, "collapsed": False,
+                             "saveOnWindowClose": True})
+        s["splitViewData"].append({"groupId": gid, "gridType": "vsep",
+                                   "tabs": [t["zenSyncId"] for t in tabs]})
+        self.save_session(self.profile, s)
+        code, out = self.run_sync("--apply")
+        self.assertEqual(code, 1, out)
+        self.assertIn("(put in a split view)", out)
+        code, out = self.run_sync("--apply", "--overwrite-zen-changes")
+        self.assertEqual(code, 0, out)
+        after = self.session(self.profile)
+        self.assertFalse(any(f["id"] == gid for f in after["folders"]))
+        self.assertFalse(any(g["id"] == gid for g in after["groups"]))
+        self.assertFalse(any(e["groupId"] == gid for e in after["splitViewData"]))
+        trees, lost = sim.sidebar(after)
+        self.assertEqual((trees[(self.ws, "pinned")], lost), (EXPECTED_SPLIT_PINNED, []))
+
+    def test_unexpected_items_inside_a_split_are_kept(self):
+        a = split_arc()
+        a.tab("t-x", url("t-x"))
+        a.folder("f-odd", "Odd", ["t-x"])
+        a.items[a.items.index("sv-stack") + 1]["childrenIds"].append("f-odd")
+        shutil.rmtree(self.arc_dir)
+        a.write(self.arc_dir)
+        arc = S.ArcData(self.arc_dir)
+        pinned = arc.spaces[0].pinned
+        i = next(n for n, node in enumerate(pinned) if node["id"] == "sv-stack")
+        self.assertEqual([c["id"] for c in pinned[i]["children"]], ["t-s1", "t-s2"])
+        self.assertEqual((pinned[i + 1]["kind"], pinned[i + 1]["name"]), ("folder", "Odd"))
+
+
 class TestSplitSizes(unittest.TestCase):
     def sizes(self, factors, n):
         panes = [{"id": f"p{i}"} for i in range(n)]
