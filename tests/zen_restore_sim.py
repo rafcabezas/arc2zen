@@ -8,8 +8,11 @@ check the sync's output against an independent implementation of:
   * ZenFolders.restoreDataFromSessionStore: each folder replaces its group
     node; then, in folders-array order, a folder with parentId moves after
     the element named by prevSiblingInfo, or after its parent's first child.
+    A splitViewGroup entry keeps its (split view) group node, and nests it
+    the same way.
   * ZenFolders.storeDataForSessionStore: folders saved in DOM order with the
-    previous element sibling as prevSiblingInfo.
+    previous element sibling as prevSiblingInfo; split view groups only when
+    they are inside a folder.
 """
 
 
@@ -42,7 +45,7 @@ def insert_after(item, node):
 def restore(session):
     """Returns (root node, names of folders that could not be restored)."""
     root = Node("root", None)
-    groups = {g["id"] for g in session.get("groups", [])}
+    groups = {g["id"]: g for g in session.get("groups", [])}
     group_nodes, by_id = {}, {}
     for tab in session["tabs"]:
         node = Node("tab", tab.get("zenSyncId"), tab)
@@ -50,7 +53,7 @@ def restore(session):
         gid = tab.get("groupId")
         if gid and gid in groups:
             if gid not in group_nodes:
-                group_nodes[gid] = Node("group", gid)
+                group_nodes[gid] = by_id[gid] = Node("group", gid, groups[gid])
                 append(root, group_nodes[gid])
             append(group_nodes[gid], node)
             if tab.get("zenIsEmpty"):
@@ -62,7 +65,10 @@ def restore(session):
     for folder in session.get("folders", []):
         old = group_nodes.get(folder["id"])
         if old is None:
-            lost.append(folder["name"])
+            lost.append(folder["name"] or folder["id"])
+            continue
+        if folder.get("splitViewGroup"):
+            work[folder["id"]] = old
             continue
         node = Node("folder", folder["id"], folder)
         parent = old.parent
@@ -77,7 +83,7 @@ def restore(session):
         if node is None or not folder.get("parentId"):
             continue
         parent = work.get(folder["parentId"])
-        if parent is None:
+        if parent is None or parent.kind != "folder":
             continue
         prev = folder.get("prevSiblingInfo") or {}
         if prev.get("type") in ("tab", "group") and prev.get("id") in by_id:
@@ -96,6 +102,8 @@ def _tree(node):
             if child.data.get("zenIsEmpty"):
                 continue
             out.append(("tab", child.data["entries"][-1]["url"]))
+        elif child.kind == "group":
+            out.append(("split", _tree(child)))
         else:
             out.append(("folder", child.data["name"], _tree(child)))
     return out
@@ -129,6 +137,8 @@ def sidebar(session):
             if tab.get("zenIsEmpty"):
                 continue
             out.setdefault(key, []).append(("tab", tab["entries"][-1]["url"]))
+        elif top.kind == "group":
+            out.setdefault(key, []).append(("split", _tree(top)))
         else:
             out.setdefault(key, []).append(("folder", top.data["name"], _tree(top)))
     return out, lost
@@ -151,12 +161,21 @@ def resave(session):
     order.sort(key=lambda r: (r[0][0], r[0][1], r[0][2], r[1]))
 
     tabs, folders = [], []
+    split_entries = {f["id"]: f for f in session.get("folders", []) if f.get("splitViewGroup")}
 
     def walk(node, parent_folder):
         if node.kind == "tab":
             tabs.append(dict(node.data))
             return
-        folder = dict(node.data)
+        if node.kind == "group":
+            if parent_folder is None:         # not saved outside a folder
+                for child in node.children:
+                    walk(child, None)
+                return
+            folder = dict(split_entries.get(node.id) or {"splitViewGroup": True, "id": node.id,
+                                                          "name": "", "emptyTabIds": []})
+        else:
+            folder = dict(node.data)
         siblings = node.parent.children
         i = siblings.index(node)
         if parent_folder is None:
@@ -165,7 +184,7 @@ def resave(session):
             prev_info = None
         else:
             prev = siblings[i - 1]
-            prev_info = ({"type": "group", "id": prev.id} if prev.kind == "folder"
+            prev_info = ({"type": "group", "id": prev.id} if prev.kind in ("folder", "group")
                          else {"type": "tab", "id": prev.id})
         folder["prevSiblingInfo"] = prev_info
         folder["parentId"] = parent_folder

@@ -174,8 +174,7 @@ EXPECTED_PERSONAL = [
     ("folder", "Empty", []),
     ("tab", "https://parent.example.com/"),
     ("tab", "https://child.example.com/"),
-    ("tab", "https://split1.example.com/"),
-    ("tab", "https://split2.example.com/"),
+    ("split", [("tab", "https://split1.example.com/"), ("tab", "https://split2.example.com/")]),
     ("tab", "https://same.example.com/"),
 ]
 EXPECTED_WORK = [
@@ -402,7 +401,8 @@ class TestDryRun(SyncTestCase):
         code, out = self.run_sync("--dump-arc")
         self.assertEqual(code, 0, out)
         for text in ("Deep/", "Empty/  (empty)", "https://child.example.com/",
-                     "welcomeToArc: 1", "splitView: 1", "arc: 1", "'Side Project' (Profile 2)"):
+                     "welcomeToArc: 1", "= split view, side by side: 50% / 50%", "arc: 1",
+                     "'Side Project' (Profile 2)"):
             self.assertIn(text, out)
 
 
@@ -454,7 +454,7 @@ class TestFreshProfile(SyncTestCase):
         self.assertNotIn("zenStaticLabel", by_url["https://same.example.com/"])
         self.assertNotIn("arc://settings", by_url)
         self.assertIn("1 non-web tab(s) skipped (arc: 1)", self.out)
-        self.assertIn("splitView: 1", self.out)
+        self.assertNotIn("splitView", self.out)           # a real split view now
         self.assertIn("Skipped empty Arc spaces: 'Scratch'", self.out)
 
     def test_groups_contiguous_placeholders_unique_ids(self):
@@ -463,10 +463,11 @@ class TestFreshProfile(SyncTestCase):
         self.assertEqual(len(ids), len(set(ids)))
         folder_ids = [f["id"] for f in s["folders"]]
         self.assertEqual(len(folder_ids), len(set(folder_ids)))
-        self.assertEqual({g["id"] for g in s["groups"]}, set(folder_ids))
+        split_ids = [e["groupId"] for e in s["splitViewData"]]
+        self.assertEqual({g["id"] for g in s["groups"]}, set(folder_ids) | set(split_ids))
         owned = [t for t in s["tabs"] if S.is_owned_tab(t["zenSyncId"])]
         for f in s["folders"]:
-            if not S.is_owned_folder(f["id"]):
+            if not S.is_owned_folder(f["id"]) or f["splitViewGroup"]:
                 continue
             run = [i for i, t in enumerate(owned) if t.get("groupId") == f["id"]]
             self.assertEqual(run, list(range(run[0], run[0] + len(run))), f["name"])
@@ -1059,6 +1060,238 @@ class TestExistingProfile(SyncTestCase):
         self.assertEqual(code, 0, out)
         self.assertEqual(self.containers(self.profile), first)
         self.assertEqual(self.state(self.profile)["arc_profiles"]["Profile 2"], 8)
+
+
+def split_arc(drop_inner_split=False):
+    """One space with split views: two inside a folder (Arc's partial width
+    factors), a stacked one, a one-pane one, a five-pane one and an open one."""
+    a = ArcFixture()
+    for iid in ("t-jira", "t-a", "t-b", "t-c", "t-d", "t-e", "t-after", "t-s1", "t-s2",
+                "t-solo", "t-f1", "t-f2", "t-f3", "t-f4", "t-f5", "o-a", "o-b", "o-c"):
+        a.tab(iid, f"https://{iid}.example.com/")
+    side = {"layoutOrientation": "horizontal"}
+    inner = ["t-a", "t-b"] if drop_inner_split else ["sv-in"]
+    if not drop_inner_split:
+        a.item("sv-in", None, {"splitView": dict(side, itemWidthFactors=[
+            "t-a", 0.8515519568151146, "t-b", 0.14844804318488536])}, ["t-a", "t-b"])
+    a.item("sv-three", None, {"splitView": dict(side, itemWidthFactors=[
+        "t-c", 0.3451, "t-d", 0.3215])}, ["t-c", "t-d", "t-e"])
+    a.folder("f-ticket", "Ticket", ["t-jira"] + inner + ["sv-three", "t-after"])
+    a.item("sv-stack", None, {"splitView": {"layoutOrientation": "vertical"}}, ["t-s1", "t-s2"])
+    a.item("sv-one", None, {"splitView": dict(side, itemWidthFactors=["t-solo", 1])},
+           ["t-solo"])
+    a.item("sv-five", None, {"splitView": side}, ["t-f1", "t-f2", "t-f3", "t-f4", "t-f5"])
+    a.item("sv-open", None, {"splitView": dict(side, itemWidthFactors=["o-a", 0.5])},
+           ["o-a", "o-b"])
+    a.space("s-work", "Work", "Default", ["f-ticket", "sv-stack", "sv-one", "sv-five"],
+            ["sv-open", "o-c"])
+    return a
+
+
+def url(iid):
+    return f"https://{iid}.example.com/"
+
+
+EXPECTED_SPLIT_PINNED = [
+    ("folder", "Ticket", [
+        ("tab", url("t-jira")),
+        ("split", [("tab", url("t-a")), ("tab", url("t-b"))]),
+        ("split", [("tab", url("t-c")), ("tab", url("t-d")), ("tab", url("t-e"))]),
+        ("tab", url("t-after")),
+    ]),
+    ("split", [("tab", url("t-s1")), ("tab", url("t-s2"))]),
+    ("tab", url("t-solo")),
+    ("split", [("tab", url(f"t-f{i}")) for i in range(1, 5)]),
+    ("tab", url("t-f5")),
+]
+EXPECTED_SPLIT_OPEN = [("split", [("tab", url("o-a")), ("tab", url("o-b"))]),
+                       ("tab", url("o-c"))]
+
+
+class TestSplitViews(SyncTestCase):
+    def setUp(self):
+        super().setUp()
+        shutil.rmtree(self.arc_dir)
+        split_arc().write(self.arc_dir)
+        self.profile = fresh_zen(self.zen_dir)
+        code, self.out = self.run_sync("--apply")
+        self.assertEqual(code, 0, self.out)
+        self.s = self.session(self.profile)
+        self.ws = self.space_by_name(self.s, "Work")["uuid"]
+
+    def tab_id(self, iid, s=None):
+        return next(t["zenSyncId"] for t in (s or self.s)["tabs"]
+                    if t["entries"][0]["url"] == url(iid))
+
+    def split(self, arc_id, s=None):
+        gid = S.folder_sync_id(arc_id)
+        s = s or self.s
+        return (gid, next((e for e in s["splitViewData"] if e["groupId"] == gid), None),
+                next((g for g in s["groups"] if g["id"] == gid), None),
+                next((f for f in s["folders"] if f["id"] == gid), None))
+
+    def leaves(self, entry):
+        return [(leaf["tabId"], leaf["sizeInParent"]) for leaf in entry["layoutTree"]["children"]]
+
+    def test_sidebar_matches_arc(self):
+        trees, lost = sim.sidebar(self.s)
+        self.assertEqual(lost, [])
+        self.assertEqual(trees[(self.ws, "pinned")], EXPECTED_SPLIT_PINNED)
+        self.assertEqual(trees[(self.ws, "open")], EXPECTED_SPLIT_OPEN)
+        self.assertIn("split views 5", self.out)
+        self.assertIn("5 split view(s).", self.out)
+
+    def test_split_in_folder_records(self):
+        gid, entry, group, folder = self.split("sv-in")
+        ticket = S.folder_sync_id("f-ticket")
+        a, b = self.tab_id("t-a"), self.tab_id("t-b")
+        self.assertTrue(group["splitView"])
+        self.assertTrue(group["pinned"])
+        self.assertEqual(folder["parentId"], ticket)
+        self.assertTrue(folder["splitViewGroup"])
+        self.assertEqual(folder["emptyTabIds"], [])
+        self.assertEqual(folder["prevSiblingInfo"], {"type": "tab", "id": self.tab_id("t-jira")})
+        self.assertEqual(entry["gridType"], "vsep")
+        self.assertEqual(entry["tabs"], [a, b])
+        self.assertEqual(entry["layoutTree"]["type"], "splitter")
+        self.assertEqual(entry["layoutTree"]["direction"], "row")
+        (la, sa), (lb, sb) = self.leaves(entry)
+        self.assertEqual((la, lb), (a, b))
+        self.assertAlmostEqual(sa, 85.15519568, places=6)
+        self.assertAlmostEqual(sb, 14.84480432, places=6)
+        for tid in (a, b):
+            tab = next(t for t in self.s["tabs"] if t["zenSyncId"] == tid)
+            self.assertEqual(tab["groupId"], gid)
+            self.assertTrue(tab["pinned"])
+        # The second split follows the first inside the folder
+        _, three, _, three_folder = self.split("sv-three")
+        self.assertEqual(three_folder["prevSiblingInfo"], {"type": "group", "id": gid})
+        sizes = [size for _, size in self.leaves(three)]
+        self.assertEqual([round(x, 2) for x in sizes], [34.51, 32.15, 33.34])
+
+    def test_top_level_and_open_splits(self):
+        _, stack, group, folder = self.split("sv-stack")
+        self.assertIsNone(folder)               # Zen saves no folder entry outside a folder
+        self.assertEqual(stack["gridType"], "hsep")
+        self.assertEqual(stack["layoutTree"]["direction"], "column")
+        self.assertEqual([s for _, s in self.leaves(stack)], [50, 50])
+        _, five, _, _ = self.split("sv-five")
+        self.assertEqual(len(five["tabs"]), S.MAX_SPLIT_PANES)
+        self.assertNotIn("groupId", next(t for t in self.s["tabs"]
+                                         if t["zenSyncId"] == self.tab_id("t-f5")))
+        self.assertEqual(self.split("sv-one")[1:], (None, None, None))
+        self.assertNotIn("groupId", next(t for t in self.s["tabs"]
+                                         if t["zenSyncId"] == self.tab_id("t-solo")))
+        _, opened, group, _ = self.split("sv-open")
+        self.assertFalse(group["pinned"])
+        self.assertEqual([s for _, s in self.leaves(opened)], [50, 50])
+        for tid in opened["tabs"]:
+            self.assertFalse(next(t for t in self.s["tabs"] if t["zenSyncId"] == tid)["pinned"])
+        # Every split view has a layout tree (Zen stops restoring at one without)
+        # and a group; every leaf names a tab of that group
+        groups = {g["id"] for g in self.s["groups"]}
+        for e in self.s["splitViewData"]:
+            self.assertIn(e["groupId"], groups)
+            members = [t["zenSyncId"] for t in self.s["tabs"] if t.get("groupId") == e["groupId"]]
+            self.assertEqual([leaf for leaf, _ in self.leaves(e)], members)
+            self.assertAlmostEqual(sum(s for _, s in self.leaves(e)), 100)
+
+    def test_render_layout_marks_split_tabs(self):
+        layout = S.render_layout(self.s)[S.section_key("pinned", self.ws)]
+        by_id = {e["id"]: e for e in layout}
+        ticket = S.folder_sync_id("f-ticket")
+        for iid in ("t-a", "t-b"):
+            e = by_id[self.tab_id(iid)]
+            self.assertEqual(e["parent"], ticket)
+            self.assertEqual(e["split"], S.folder_sync_id("sv-in"))
+        self.assertEqual(by_id[self.tab_id("t-s1")]["parent"], None)
+        self.assertNotIn("split", by_id[self.tab_id("t-jira")])
+        self.assertEqual([by_id[self.tab_id(i)]["position"]
+                          for i in ("t-jira", "t-a", "t-b", "t-c", "t-d", "t-e", "t-after")],
+                         list(range(7)))
+
+    def test_rerun_and_zen_resave_change_nothing(self):
+        code, out = self.run_sync("--apply")
+        self.assertEqual(code, 0, out)
+        self.assertIn("Already in sync; nothing written.", out)
+        self.save_session(self.profile, sim.resave(self.s))
+        code, out = self.run_sync("--apply")
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("changed in Zen", out)
+        trees, lost = sim.sidebar(self.session(self.profile))
+        self.assertEqual((trees[(self.ws, "pinned")], lost), (EXPECTED_SPLIT_PINNED, []))
+
+    def test_pane_sizes_changed_in_zen_are_kept(self):
+        s = copy.deepcopy(self.s)
+        _, entry, _, _ = self.split("sv-in", s)
+        entry["layoutTree"]["children"][0]["sizeInParent"] = 60
+        entry["layoutTree"]["children"][1]["sizeInParent"] = 40
+        self.save_session(self.profile, s)
+        code, out = self.run_sync("--apply")
+        self.assertEqual(code, 0, out)
+        _, after, _, _ = self.split("sv-in", self.session(self.profile))
+        self.assertEqual([size for _, size in self.leaves(after)], [60, 40])
+
+    def test_split_undone_in_arc(self):
+        shutil.rmtree(self.arc_dir)
+        split_arc(drop_inner_split=True).write(self.arc_dir)
+        code, out = self.run_sync("--apply")
+        self.assertEqual(code, 0, out)
+        after = self.session(self.profile)
+        self.assertEqual(self.split("sv-in", after)[1:], (None, None, None))
+        ticket = S.folder_sync_id("f-ticket")
+        for iid in ("t-a", "t-b"):
+            tab = next(t for t in after["tabs"] if t["zenSyncId"] == self.tab_id(iid, after))
+            self.assertEqual(tab["groupId"], ticket)
+        trees, lost = sim.sidebar(after)
+        self.assertEqual(lost, [])
+        self.assertEqual(trees[(self.ws, "pinned")][0][2][:3],
+                         [("tab", url("t-jira")), ("tab", url("t-a")), ("tab", url("t-b"))])
+
+    def test_no_open_tabs_run_keeps_open_split(self):
+        code, out = self.run_sync("--apply", "--no-open-tabs")
+        self.assertEqual(code, 0, out)
+        after = self.session(self.profile)
+        gid, entry, group, _ = self.split("sv-open", after)
+        self.assertIsNotNone(entry)
+        self.assertIsNotNone(group)
+        self.assertEqual(sim.sidebar(after)[0][(self.ws, "open")], EXPECTED_SPLIT_OPEN)
+
+    def test_users_own_split_view_is_kept(self):
+        s = copy.deepcopy(self.s)
+        own = [zen_tab(f"1700000000000-{i}0000000-0000-4000-8000-000000000000",
+                       f"https://own{i}.example.org/", self.ws, pinned=False, group="1700000000000-5")
+               for i in (1, 2)]
+        s["tabs"] += own
+        s["groups"].append({"pinned": False, "splitView": True, "id": "1700000000000-5",
+                            "name": "", "color": "", "collapsed": False,
+                            "saveOnWindowClose": True})
+        mine = {"groupId": "1700000000000-5", "gridType": "vsep", "tabs": [t["zenSyncId"] for t in own],
+                "layoutTree": {"type": "splitter", "direction": "row", "children": [
+                    {"type": "leaf", "tabId": t["zenSyncId"], "sizeInParent": 50} for t in own]}}
+        s["splitViewData"].append(mine)
+        self.save_session(self.profile, s)
+        code, out = self.run_sync("--apply")
+        self.assertEqual(code, 0, out)
+        after = self.session(self.profile)
+        self.assertIn(mine, after["splitViewData"])
+        self.assertIn("1700000000000-5", {g["id"] for g in after["groups"]})
+
+
+class TestSplitSizes(unittest.TestCase):
+    def sizes(self, factors, n):
+        panes = [{"id": f"p{i}"} for i in range(n)]
+        return [round(x, 4) for x in S.split_sizes({"itemWidthFactors": factors}, panes)]
+
+    def test_partial_full_and_bad_factors(self):
+        self.assertEqual(self.sizes(["p0", 0.5], 2), [50, 50])
+        self.assertEqual(self.sizes(["p0", 0.25], 2), [25, 75])
+        self.assertEqual(self.sizes(["p0", 0.2, "p1", 0.3, "p2", 0.5], 3), [20, 30, 50])
+        self.assertEqual(self.sizes(["p0", 0.4, "p1", 0.4], 2), [50, 50])   # normalised
+        self.assertEqual(self.sizes([], 3), [33.3333] * 3)
+        self.assertEqual(self.sizes(None, 2), [50, 50])
+        self.assertEqual(self.sizes(["p0", 1, "p1", 0.5], 3), [33.3333] * 3)  # none left
+        self.assertEqual(self.sizes(["gone", 0.9, "p0", "x", "p1", True], 2), [50, 50])
 
 
 class TestPrefsAndErrors(SyncTestCase):

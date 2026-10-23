@@ -6,6 +6,7 @@ A one-time migration for people leaving Arc. For every Arc space it creates
 or reuses a Zen workspace and writes, in Arc's exact order:
   * pinned tabs and folders: nested folders, empty folders, Arc's custom tab
     names and the favicons from Arc's cache
+  * split views (pinned or open, inside folders too), with Arc's pane sizes
   * open (unpinned) tabs, unless --no-open-tabs
   * Arc Favorites as Zen Essentials. Each Arc profile gets one Zen container
     (the default profile keeps its matched workspace's container, or none),
@@ -89,6 +90,7 @@ MOZLZ4_MAGIC = b"mozLz40\0"
 SYSTEM_PRINCIPAL = '{"3":{}}'
 ZEN_ICON_URL = "chrome://browser/skin/zen-icons/selectable/{}.svg"
 WEB_SCHEMES = ("http", "https", "file")
+MAX_SPLIT_PANES = 4                     # ZenViewSplitter.MAX_TABS
 DEFAULT_PROFILE = "Default"
 MAX_USER_CONTEXT_ID = 4294967295
 
@@ -327,10 +329,33 @@ def count_nodes(nodes) -> tuple[int, int]:
         if node["kind"] == "tab":
             tabs += 1
         else:
-            folders += 1
+            folders += node["kind"] == "folder"
             t, f = count_nodes(node["children"])
             tabs, folders = tabs + t, folders + f
     return tabs, folders
+
+
+def count_splits(nodes) -> int:
+    return sum(1 if node["kind"] == "split" else count_splits(node["children"])
+               for node in nodes if node["kind"] != "tab")
+
+
+def split_sizes(split: dict, panes: list) -> list:
+    """Pane sizes in percent, from Arc's itemWidthFactors ([id, factor, ...]).
+    Arc often lists only some panes; the others share what is left equally."""
+    flat = split.get("itemWidthFactors")
+    flat = flat if isinstance(flat, list) else []
+    factors = {k: v for k, v in zip(flat[::2], flat[1::2])
+               if isinstance(k, str) and isinstance(v, (int, float)) and not isinstance(v, bool)
+               and 0 < v <= 1}
+    known = {p["id"]: factors[p["id"]] for p in panes if p["id"] in factors}
+    rest = len(panes) - len(known)
+    left = 1 - sum(known.values())
+    if (rest and left <= 0) or (not rest and left < -1e-6):
+        return [100 / len(panes)] * len(panes)    # inconsistent factors: equal panes
+    sizes = [known.get(p["id"], left / rest if rest else 0) for p in panes]
+    total = sum(sizes)
+    return [100 * s / total for s in sizes]
 
 
 class ArcSpace:
@@ -358,7 +383,9 @@ class ArcData:
     """Arc's sidebar (StorableSidebar.json) as trees of tab/folder nodes.
 
     A tab node is {"kind": "tab", "id", "url", "title", "label", "icon"}, a
-    folder node {"kind": "folder", "id", "name", "children"}; lists are in
+    folder node {"kind": "folder", "id", "name", "children"} and a split view
+    {"kind": "split", "id", "children" (2-4 tabs), "direction" ("row": side
+    by side, "column": stacked), "sizes" (percent per pane)}; lists are in
     Arc's display order (each container's childrenIds).
     """
 
@@ -478,6 +505,19 @@ class ArcData:
                         or "").strip() or "Folder"
                 nodes.append({"kind": "folder", "id": cid, "name": name,
                               "children": self._tree(children)})
+            elif "splitView" in data:
+                split = data["splitView"] if isinstance(data["splitView"], dict) else {}
+                panes = [n for n in self._tree(children) if n["kind"] == "tab"]
+                if len(panes) >= 2:
+                    # Zen drops a split view of more than MAX_SPLIT_PANES on restore
+                    shown = panes[:MAX_SPLIT_PANES]
+                    vertical = split.get("layoutOrientation") == "vertical"
+                    nodes.append({"kind": "split", "id": cid, "children": shown,
+                                  "direction": "column" if vertical else "row",
+                                  "sizes": split_sizes(split, shown)})
+                    nodes.extend(panes[MAX_SPLIT_PANES:])
+                else:
+                    nodes.extend(panes)           # a one-pane split is just a tab
             elif "tab" in data:
                 tab = data["tab"] if isinstance(data["tab"], dict) else {}
                 url = tab.get("savedURL")
@@ -890,8 +930,12 @@ class SessionBuilder:
     Zen restores folders from runs of tabs sharing a groupId, each starting
     with an empty placeholder tab. Nested folders are then moved inside
     their parent, after the element named in prevSiblingInfo, so they are
-    emitted in pre-order. Items written by an earlier run keep their Zen
-    state (history, collapsed folders) when Arc did not change them.
+    emitted in pre-order. A split view is a group of its tabs plus a
+    splitViewData entry (the layout tree, leaves naming tabs by zenSyncId);
+    inside a folder it also needs a folders entry with splitViewGroup set,
+    which nests it like a subfolder. Items written by an earlier run keep
+    their Zen state (history, collapsed folders, resized panes) when Arc did
+    not change them.
     """
 
     def __init__(self, old_session: dict, now_ms: int):
@@ -900,9 +944,12 @@ class SessionBuilder:
                          if isinstance(t, dict) and is_owned_tab(t.get("zenSyncId"))}
         self.old_folders = {f.get("id"): f for f in old_session.get("folders") or []
                             if isinstance(f, dict) and is_owned_folder(f.get("id"))}
+        self.old_splits = {e.get("groupId"): e for e in old_session.get("splitViewData") or []
+                           if isinstance(e, dict) and is_owned_folder(e.get("groupId"))}
         self.tabs: list = []
         self.folders: list = []
         self.groups: list = []
+        self.splits: list = []
 
     def _emit(self, fresh: dict) -> str:
         old = self.old_tabs.get(fresh["zenSyncId"])
@@ -946,15 +993,26 @@ class SessionBuilder:
         for node in nodes:
             if node["kind"] == "tab":
                 prev = {"type": "tab", "id": self._tab(node, ws_uuid, container, None)}
+            elif node["kind"] == "split":
+                prev = {"type": "group", "id": self._split(node, ws_uuid, container)}
             else:
                 fid = folder_sync_id(node["id"])
                 self._folder(node, fid, ws_uuid, container, None, prev)
                 prev = {"type": "group", "id": fid}
 
     def add_open(self, nodes, ws_uuid, container):
-        for info in flatten(nodes):
-            self._emit(make_tab(tab_sync_id(info["id"]), info["url"], info["title"], ws_uuid,
-                                container, pinned=False, icon=info["icon"], now=self.now))
+        for node in nodes:
+            if node["kind"] == "tab":
+                self._open_tab(node, ws_uuid, container, None)
+            elif node["kind"] == "split":
+                self._split(node, ws_uuid, container, pinned=False)
+            else:                         # Zen has no folders among open tabs
+                self.add_open(node["children"], ws_uuid, container)
+
+    def _open_tab(self, info, ws_uuid, container, group_id) -> str:
+        return self._emit(make_tab(tab_sync_id(info["id"]), info["url"], info["title"], ws_uuid,
+                                   container, pinned=False, group_id=group_id,
+                                   icon=info["icon"], now=self.now))
 
     def _tab(self, info, ws_uuid, container, group_id) -> str:
         return self._emit(make_tab(tab_sync_id(info["id"]), info["url"], info["title"], ws_uuid,
@@ -1005,7 +1063,61 @@ class SessionBuilder:
                 subfolders.append((child, sub_id, inner_prev))
                 inner_prev = {"type": "group", "id": sub_id}
         for child, sub_id, child_prev in subfolders:
-            self._folder(child, sub_id, ws_uuid, container, folder_id, child_prev)
+            if child["kind"] == "split":
+                self._split(child, ws_uuid, container, folder_id, child_prev)
+            else:
+                self._folder(child, sub_id, ws_uuid, container, folder_id, child_prev)
+
+    def _split(self, node, ws_uuid, container, parent_id=None, prev=None, pinned=True) -> str:
+        split_id = folder_sync_id(node["id"])
+        emit = self._tab if pinned else self._open_tab
+        tab_ids = [emit(pane, ws_uuid, container, split_id) for pane in node["children"]]
+        if parent_id:
+            # Zen saves a split view inside a folder like a subfolder, so it
+            # is put back into that folder after prevSiblingInfo
+            self.folders.append({
+                "pinned": True,
+                "essential": False,
+                "splitViewGroup": True,
+                "id": split_id,
+                "name": "",
+                "collapsed": False,
+                "saveOnWindowClose": True,
+                "parentId": parent_id,
+                "prevSiblingInfo": prev,
+                "emptyTabIds": [],
+                "userIcon": "",
+                "isLiveFolder": False,
+                "workspaceId": ws_uuid,
+            })
+        self.groups.append({
+            "pinned": pinned,
+            "splitView": True,
+            "id": split_id,
+            "name": "",
+            "color": "zen-workspace-color",
+            "collapsed": False,
+            "saveOnWindowClose": True,
+        })
+        old = self.old_splits.get(split_id)
+        if old and old.get("tabs") == tab_ids and isinstance(old.get("layoutTree"), dict):
+            self.splits.append(copy.deepcopy(old))    # same panes: keep sizes set in Zen
+        else:
+            # Always with a layoutTree: Zen 1.22/1.23 rebuilds a split without
+            # one, but then returns from its restore loop, dropping every
+            # later split view in the session
+            self.splits.append({
+                "groupId": split_id,
+                "gridType": "vsep" if node["direction"] == "row" else "hsep",
+                "layoutTree": {
+                    "type": "splitter",
+                    "direction": node["direction"],
+                    "children": [{"type": "leaf", "tabId": tid, "sizeInParent": size}
+                                 for tid, size in zip(tab_ids, node["sizes"])],
+                },
+                "tabs": tab_ids,
+            })
+        return split_id
 
 
 # --------------------------------------------------------------------------- #
@@ -1051,7 +1163,8 @@ def render_layout(session: dict) -> dict:
     Follows Tabbrowser.createTabsForSessionRestore (a group is created where
     its first tab is; later tabs join it) and ZenFolders.
     restoreDataFromSessionStore (folders replace their group, then nest via
-    parentId + prevSiblingInfo). Placeholder and glance tabs are left out.
+    parentId + prevSiblingInfo; a splitViewGroup entry nests its split
+    view's group the same way). Placeholder and glance tabs are left out.
     """
     groups = {g.get("id") for g in session.get("groups") or [] if isinstance(g, dict)}
     root = _Node("root", None, None)
@@ -1075,11 +1188,13 @@ def render_layout(session: dict) -> dict:
 
     folders = [f for f in session.get("folders") or [] if isinstance(f, dict) and f.get("id")]
     empty_ids = set()
-    folder_nodes = {}
+    folder_nodes, nested_splits = {}, {}
     for f in folders:
         if isinstance(f.get("emptyTabIds"), list):
             empty_ids.update(f["emptyTabIds"])
         group = group_nodes.get(f["id"])
+        if group is not None and f.get("splitViewGroup"):
+            nested_splits.setdefault(f["id"], group)   # stays a group, inside its folder
         if group is None or f.get("splitViewGroup") or f["id"] in folder_nodes:
             continue
         node = _Node("folder", f["id"], f)
@@ -1091,7 +1206,8 @@ def render_layout(session: dict) -> dict:
         folder_nodes[f["id"]] = node
         by_id[f["id"]] = node
     for f in folders:
-        node, parent = folder_nodes.get(f["id"]), folder_nodes.get(f.get("parentId"))
+        node = (nested_splits if f.get("splitViewGroup") else folder_nodes).get(f["id"])
+        parent = folder_nodes.get(f.get("parentId"))
         if node is None or parent is None or node.contains(parent):
             continue
         prev = f.get("prevSiblingInfo") if isinstance(f.get("prevSiblingInfo"), dict) else {}
@@ -1621,7 +1737,9 @@ def build_session(plan: Plan, arc: ArcData, session: dict, state: dict | None,
         if not t["zenIsEmpty"]:
             arc_urls.setdefault(tab_section(t), set()).add(tab_url(t))
     for f in builder.folders:
-        arc_folders.setdefault(section_key("pinned", f["workspaceId"]), set()).add(norm(f["name"]))
+        if not f["splitViewGroup"]:
+            arc_folders.setdefault(section_key("pinned", f["workspaceId"]),
+                                   set()).add(norm(f["name"]))
 
     def bump(sec, key):
         stats.setdefault(sec, Counter())[key] += 1
@@ -1658,6 +1776,11 @@ def build_session(plan: Plan, arc: ArcData, session: dict, state: dict | None,
         sec = section_key("pinned", folder.get("workspaceId"))
         if fid in new_folder_ids:
             continue
+        if folder.get("splitViewGroup"):
+            # where a split view sits inside a folder; it goes with its tabs
+            if not (sec in managed and (is_owned_folder(fid) or replace_existing)):
+                kept_folders.append(folder)
+            continue
         if sec in managed and (is_owned_folder(fid) or replace_existing):
             bump(sec, "folders removed" if is_owned_folder(fid) else "folders replaced")
             continue
@@ -1669,9 +1792,11 @@ def build_session(plan: Plan, arc: ArcData, session: dict, state: dict | None,
 
     folder_ids = new_folder_ids | {f.get("id") for f in kept_folders}
     other_group_ids = {t.get("groupId") for t in kept_tabs if isinstance(t, dict)} - folder_ids
+    # A synced split view whose tabs are kept (open tabs on a --no-open-tabs
+    # run) keeps its group; a synced folder's group is always rebuilt
     group_ids = folder_ids | {g.get("id") for g in session.get("groups") or []
                               if isinstance(g, dict) and g.get("id") in other_group_ids
-                              and not is_owned_folder(g.get("id"))}
+                              and (not is_owned_folder(g.get("id")) or g.get("splitView"))}
     orphans = [t for t in kept_tabs if isinstance(t, dict) and t.get("groupId")
                and t["groupId"] not in group_ids]
     for tab in orphans:
@@ -1682,8 +1807,9 @@ def build_session(plan: Plan, arc: ArcData, session: dict, state: dict | None,
         if folder.get("parentId") and folder["parentId"] not in folder_ids:
             folder["parentId"] = None
             folder["prevSiblingInfo"] = {"type": "start", "id": None}
+    new_group_ids = {g["id"] for g in builder.groups}
     kept_groups = [g for g in session.get("groups") or [] if isinstance(g, dict)
-                   and g.get("id") in group_ids and g.get("id") not in new_folder_ids]
+                   and g.get("id") in group_ids and g.get("id") not in new_group_ids]
 
     # Workspaces: first sync puts Arc's spaces first in Arc's order; later
     # runs keep the order the user has in Zen
@@ -1705,7 +1831,10 @@ def build_session(plan: Plan, arc: ArcData, session: dict, state: dict | None,
     session["tabs"] = builder.tabs + kept_tabs
     session["folders"] = builder.folders + kept_folders
     session["groups"] = builder.groups + kept_groups
-    # splitViewData is left alone: Zen skips entries whose tabs are gone
+    live_groups = new_group_ids | {g.get("id") for g in kept_groups}
+    session["splitViewData"] = builder.splits + [
+        e for e in session.get("splitViewData") or []
+        if isinstance(e, dict) and e.get("groupId") in live_groups - new_group_ids]
 
     ids = [t.get("zenSyncId") for t in session["tabs"] if isinstance(t, dict)]
     dupes = [i for i, n in Counter(ids).items() if n > 1 and is_owned_tab(i)]
@@ -1814,6 +1943,8 @@ def print_plan(plan: Plan, arc: ArcData, containers: dict, stats: dict,
     log("\nPlan:")
     for n, item in enumerate(plan.spaces, 1):
         pinned_tabs, folders = count_nodes(item.arc.pinned)
+        splits = count_splits(item.arc.pinned) + (count_splits(item.arc.open)
+                                                   if include_open else 0)
         open_tabs = sum(1 for _ in flatten(item.arc.open)) if include_open else 0
         how = {"new": "new workspace", "same name": "matched by name",
                "--map": "matched by --map", "synced before": "synced before"}[item.how]
@@ -1830,7 +1961,8 @@ def print_plan(plan: Plan, arc: ArcData, containers: dict, stats: dict,
             log(f"       ! icon {icon_text(item.old_icon)}-> {icon_text(item.zen.get('icon'))}"
                 .rstrip())
         log(f"       pinned {pinned_tabs}, folders {folders}"
-            + (f", open {open_tabs}" if include_open else ", open tabs skipped"))
+            + (f", open {open_tabs}" if include_open else ", open tabs skipped")
+            + (f", split views {splits}" if splits else ""))
         pinned_stats = stats.get(section_key("pinned", item.uuid), Counter())
         open_stats = stats.get(section_key("open", item.uuid), Counter())
         for key, text in STAT_LABELS:
@@ -1841,6 +1973,7 @@ def print_plan(plan: Plan, arc: ArcData, containers: dict, stats: dict,
                 totals[key] += n
         totals["pinned"] += pinned_tabs
         totals["folders"] += folders
+        totals["splits"] += splits
         totals["open"] += open_tabs
         for key in ("kept dup", "folders kept dup"):
             totals[key] += pinned_stats.get(key, 0) + open_stats.get(key, 0)
@@ -1902,6 +2035,11 @@ def print_dump(arc: ArcData) -> None:
             if node["kind"] == "folder":
                 log(f"{pad}+ {node['name']}/" + ("  (empty)" if not node["children"] else ""))
                 tree(node["children"], depth + 1)
+            elif node["kind"] == "split":
+                how = "side by side" if node["direction"] == "row" else "stacked"
+                sizes = " / ".join(f"{size:.0f}%" for size in node["sizes"])
+                log(f"{pad}= split view, {how}: {sizes}")
+                tree(node["children"], depth + 1)
             else:
                 name = node["label"] or node["title"]
                 log(f"{pad}- {name[:60]}  {node['url']}")
@@ -1911,10 +2049,12 @@ def print_dump(arc: ArcData) -> None:
         color = "#{:02x}{:02x}{:02x}".format(*sp.color) if sp.color else "-"
         icon = sp.emoji or (f"[{sp.icon_name}]" if sp.icon_name else "-")
         pinned, folders = count_nodes(sp.pinned)
+        splits = count_splits(sp.pinned)
         opened = sum(1 for _ in flatten(sp.open))
         log(f"  {n}. '{sp.name}'  profile {arc.profile_label(sp.profile)}  icon {icon}  "
             f"color {color}")
-        log(f"     pinned: {pinned} tab(s), {folders} folder(s)")
+        log(f"     pinned: {pinned} tab(s), {folders} folder(s)"
+            + (f", {splits} split view(s)" if splits else ""))
         tree(sp.pinned, 0)
         log(f"     open: {opened} tab(s)")
         tree(sp.open, 0)
@@ -2240,7 +2380,8 @@ def sync_tabs(arc: ArcData, profile: str, args):
         f"({sum(1 for i in plan.spaces if i.how == 'new')} new), "
         f"{len(plan.profile_container)} container(s) ({new_identities} new), "
         f"{totals['essentials']} essential(s), {totals['pinned']} pinned tab(s), "
-        f"{totals['folders']} folder(s), {totals['open']} open tab(s).")
+        f"{totals['folders']} folder(s), {totals['open']} open tab(s)"
+        + (f", {totals['splits']} split view(s)." if totals["splits"] else "."))
     if not apply:
         return True
 
