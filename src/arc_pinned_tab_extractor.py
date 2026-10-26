@@ -182,9 +182,13 @@ class ArcPinnedTabExtractor:
             else:
                 i += 1
 
-        # Local sidebar spaces are authoritative; sync cache may be empty or stale
+        # Local sidebar spaces are authoritative; sync cache may be empty or stale.
+        # Visit the main sidebar first so each profile's first space (used for
+        # Essentials) is a real sidebar space, not a Little Arc window's.
         logger.info(f"  ℹ️  spaces_info from sync cache: {len(spaces_info)} spaces")
-        for c in data.get('sidebar', {}).get('containers', []):
+        sidebar = self._sidebar_container(data)
+        containers = data.get('sidebar', {}).get('containers', [])
+        for c in [sidebar] + [c for c in containers if c is not sidebar]:
             sp = c.get('spaces', [])
             for j in range(len(sp) - 1):
                 if isinstance(sp[j], str) and isinstance(sp[j + 1], dict):
@@ -204,9 +208,8 @@ class ArcPinnedTabExtractor:
                     logger.info(f"  👤 {spaces_info[sid]['name']} ({sid[:8]}) → {spaces_info[sid]['profile']} (local sidebar)")
 
         # Get all items from local sidebar
-        containers = data.get('sidebar', {}).get('containers', [])
-        if len(containers) > 1 and 'items' in containers[1]:
-            items = containers[1]['items']
+        if 'items' in sidebar:
+            items = sidebar['items']
             logger.info(f"Found {len(items)} items in local sidebar")
 
             # Build items lookup
@@ -302,8 +305,8 @@ class ArcPinnedTabExtractor:
 
             # Create ArcSpace objects using Arc's correct visual ordering
             # Use the sidebar spaces array to preserve Arc's space ordering
-            if len(containers) > 1 and 'spaces' in containers[1]:
-                sidebar_spaces = containers[1]['spaces']
+            if 'spaces' in sidebar:
+                sidebar_spaces = sidebar['spaces']
                 logger.debug(f"Processing {len(sidebar_spaces) // 2} spaces from sidebar")
                 for i in range(0, len(sidebar_spaces), 2):
                     if i + 1 < len(sidebar_spaces):
@@ -468,11 +471,11 @@ class ArcPinnedTabExtractor:
         essential_tabs_by_space = {}
 
         # Get all items from local sidebar
-        containers = data.get('sidebar', {}).get('containers', [])
-        if len(containers) <= 1 or 'items' not in containers[1]:
+        sidebar = self._sidebar_container(data)
+        if 'items' not in sidebar:
             return essential_tabs_by_space
 
-        items = containers[1]['items']
+        items = sidebar['items']
 
         # Build items lookup (items is stored as alternating id/data pairs)
         items_lookup = {}
@@ -653,11 +656,29 @@ class ArcPinnedTabExtractor:
 
         return False
 
+    @staticmethod
+    def _sidebar_container(data: Dict) -> Dict:
+        """Return the main window's sidebar container.
+
+        sidebar.containers alternates markers ({'global': ...} or
+        {'littleBrowser': ...}) with containers. On macOS the main one is
+        usually containers[1], but Little Arc windows can come first (seen on
+        Windows), so pick the container holding the most spaces, the same rule
+        sync_arc_to_zen.py uses.
+        """
+        containers = data.get('sidebar', {}).get('containers', [])
+        candidates = [c for c in containers
+                      if isinstance(c, dict) and ('items' in c or 'spaces' in c)]
+        if not candidates:
+            return {}
+        return max(candidates, key=lambda c: (sum(isinstance(s, dict) for s in c.get('spaces', [])),
+                                              len(c.get('items', []))))
+
     def _get_space_container_ids(self, space_id: str, data: Dict) -> List[str]:
         """Get the container IDs for a specific space."""
-        containers = data.get('sidebar', {}).get('containers', [])
-        if len(containers) > 1 and 'spaces' in containers[1]:
-            spaces = containers[1]['spaces']
+        sidebar = self._sidebar_container(data)
+        if 'spaces' in sidebar:
+            spaces = sidebar['spaces']
 
             # Find the space in the spaces array (stored as alternating id/data pairs)
             for i in range(0, len(spaces), 2):
@@ -706,9 +727,9 @@ class ArcPinnedTabExtractor:
 
         # If the parent is not in items (it's a container), check if it's the unpinned container
         # by checking if it immediately follows the 'unpinned' marker in containerIDs
-        containers = data.get('sidebar', {}).get('containers', [])
-        if len(containers) > 1 and 'spaces' in containers[1]:
-            spaces = containers[1]['spaces']
+        sidebar = self._sidebar_container(data)
+        if 'spaces' in sidebar:
+            spaces = sidebar['spaces']
 
             for i in range(0, len(spaces), 2):
                 if i + 1 < len(spaces) and isinstance(spaces[i], str):
@@ -739,9 +760,9 @@ class ArcPinnedTabExtractor:
             logger.debug("      ⚠️  No container IDs, returning empty display order")
             return []
 
-        containers = data.get('sidebar', {}).get('containers', [])
-        if len(containers) > 1 and 'items' in containers[1]:
-            items = containers[1]['items']
+        sidebar = self._sidebar_container(data)
+        if 'items' in sidebar:
+            items = sidebar['items']
 
             # Find the container UUID that comes immediately after the 'pinned' marker
             pinned_container_uuid = None
@@ -783,9 +804,9 @@ class ArcPinnedTabExtractor:
         if not space_container_ids:
             return []
 
-        containers = data.get('sidebar', {}).get('containers', [])
-        if len(containers) > 1 and 'items' in containers[1]:
-            items = containers[1]['items']
+        sidebar = self._sidebar_container(data)
+        if 'items' in sidebar:
+            items = sidebar['items']
 
             # Find the container UUID that comes immediately after the 'unpinned' marker
             unpinned_container_uuid = None

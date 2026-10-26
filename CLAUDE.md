@@ -92,8 +92,10 @@ python3 src/zen_workspace_mapper.py
 ```
 StorableSidebar.json
 ├── firebaseSyncState.syncData.spaceModels (space metadata + icons)
-├── sidebar.containers[1].items (tabs, folders, containers)
-├── sidebar.containers[1].spaces (space → containerIDs mapping)
+├── sidebar.containers[main].items (tabs, folders, containers)
+├── sidebar.containers[main].spaces (space → containerIDs mapping)
+│   (main = the container with the most spaces; usually [1], but Arc for
+│    Windows can list Little Arc windows' containers first)
 └── containerIDs: ['pinned', uuid, 'unpinned', uuid] per space
 ```
 

@@ -6,6 +6,7 @@ Covers:
   Fix — Default profile essentials skipped by default
   Fix — Hardcoded company names removed from _assign_essential_tab_to_space
   Fix — profile field propagated to ArcSpace and export JSON
+  Fix — main sidebar found when Little Arc windows come first (Arc for Windows)
 """
 import json
 import sys
@@ -92,6 +93,46 @@ def _make_sidebar(spaces_info: list, topapps: list) -> dict:
                 },
             ]
         },
+    }
+
+
+def _make_windows_sidebar() -> dict:
+    """StorableSidebar.json as Arc for Windows writes it: an empty sync cache, and
+    a Little Arc window's container listed before the main window's."""
+    def space(space_id, title, pinned_container, profile=None):
+        data = {
+            "id": space_id,
+            "containerIDs": ["pinned", pinned_container],
+            "profile": {"custom": {"_0": {"directoryBasename": profile}}} if profile else {"default": True},
+        }
+        if title:
+            data["title"] = title
+        return [space_id, data]
+
+    def item(item_id, children=(), parent=None, data=None):
+        return [item_id, {"id": item_id, "childrenIds": list(children),
+                          "parentID": parent, "data": data or {}}]
+
+    def tab(url, title):
+        return {"tab": {"savedURL": url, "savedTitle": title}}
+
+    little_arc = {
+        "spaces": space("little-space", None, "little-pinned"),
+        "items": item("little-pinned"),
+    }
+    main = {
+        "spaces": (space("work-space", "Work", "work-pinned")
+                   + space("home-space", "Home", "home-pinned", profile="Profile 2")),
+        "items": (item("work-pinned", children=["tab-1"])
+                  + item("tab-1", parent="work-pinned", data=tab("https://example.com", "Example"))
+                  + item("home-pinned")
+                  + item("favorites", children=["fav-1"], data={
+                      "itemContainer": {"containerType": {"topApps": {"_0": {"default": {}}}}}})
+                  + item("fav-1", parent="favorites", data=tab("https://mail.example.com", "Mail"))),
+    }
+    return {
+        "firebaseSyncState": {"syncData": {"spaceModels": []}},
+        "sidebar": {"containers": [{"littleBrowser": {}}, little_arc, {"global": {}}, main]},
     }
 
 
@@ -206,6 +247,30 @@ class TestProfileFieldOnArcSpace:
     def test_arcspace_profile_field_defaults_to_none(self):
         space = ArcSpace("s1", "Work", [], [], [])
         assert space.profile is None
+
+
+class TestWindowsSidebarLayout:
+    """Arc for Windows can list Little Arc windows' containers before the main one."""
+
+    def _extract(self, tmp_path) -> dict:
+        path = tmp_path / "StorableSidebar.json"
+        path.write_text(json.dumps(_make_windows_sidebar()), encoding="utf-8")
+        extractor = ArcPinnedTabExtractor()
+        extractor.arc_sidebar_file = path
+        spaces = extractor.extract_pinned_tabs(skip_default_essentials=False)
+        return {s.space_name: s for s in spaces}
+
+    def test_reads_main_sidebar_not_little_arc_window(self, tmp_path):
+        spaces = self._extract(tmp_path)
+        assert list(spaces) == ["Work", "Home"]
+        assert [t.url for t in spaces["Work"].pinned_tabs if not t.is_essential] == \
+            ["https://example.com"]
+
+    def test_favorites_go_to_main_sidebar_space(self, tmp_path):
+        """A profile's Favorites must not land on a Little Arc space, which is never exported."""
+        spaces = self._extract(tmp_path)
+        assert [t.url for t in spaces["Work"].pinned_tabs if t.is_essential] == \
+            ["https://mail.example.com"]
 
 
 class TestAssignEssentialTabToSpaceGeneric:
