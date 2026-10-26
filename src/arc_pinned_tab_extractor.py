@@ -75,6 +75,19 @@ class ArcSpace:
         return f"ArcSpace(name='{self.space_name}'{icon_str}, pinned={len(self.pinned_tabs)}, open={len(self.open_tabs)}, folders={len(self.folders)})"
 
 
+def arc_space_color(window_theme) -> Optional[dict]:
+    """A space's color as {'r', 'g', 'b'} (0-1), from its windowTheme's
+    primaryColorPalette.midTone, or None."""
+    palette = window_theme.get('primaryColorPalette') if isinstance(window_theme, dict) else None
+    mid_tone = palette.get('midTone') if isinstance(palette, dict) else None
+    if not isinstance(mid_tone, dict) or not all(k in mid_tone for k in ('red', 'green', 'blue')):
+        return None
+    # Arc uses extended sRGB, where values can fall outside 0-1
+    return {'r': max(0, min(1, mid_tone['red'])),
+            'g': max(0, min(1, mid_tone['green'])),
+            'b': max(0, min(1, mid_tone['blue']))}
+
+
 class ArcPinnedTabExtractor:
     """Extracts pinned tabs with folder structure from Arc's StorableSidebar.json."""
 
@@ -157,20 +170,10 @@ class ArcPinnedTabExtractor:
                     profile = "Default"
 
                 # Extract color from windowTheme if available
-                color = None
-                window_theme = custom_info.get('windowTheme', {})
-                if window_theme:
-                    primary_palette = window_theme.get('primaryColorPalette', {})
-                    if primary_palette:
-                        # Use midTone as the main color representation
-                        mid_tone = primary_palette.get('midTone', {})
-                        if mid_tone and 'red' in mid_tone and 'green' in mid_tone and 'blue' in mid_tone:
-                            # Extract RGB values (Arc uses extended sRGB with values that can be negative)
-                            r = max(0, min(1, mid_tone['red']))  # Clamp to 0-1 range
-                            g = max(0, min(1, mid_tone['green']))
-                            b = max(0, min(1, mid_tone['blue']))
-                            color = {'r': r, 'g': g, 'b': b}
-                            logger.info(f"  🎨 Found color for {space_name}: RGB({r:.3f}, {g:.3f}, {b:.3f})")
+                color = arc_space_color(custom_info.get('windowTheme'))
+                if color:
+                    logger.info(f"  🎨 Found color for {space_name}: "
+                                f"RGB({color['r']:.3f}, {color['g']:.3f}, {color['b']:.3f})")
 
                 spaces_info[space_id] = {
                     'name': space_name,
@@ -198,7 +201,7 @@ class ArcPinnedTabExtractor:
                             'name': sd.get('title', f'Space {sid}'),
                             'icon': ci.get('iconType', {}).get('emoji_v2'),
                             'profile': None,
-                            'color': None,
+                            'color': arc_space_color(ci.get('windowTheme')),
                         }
                     spaces_info[sid]['profile'] = dirname or 'Default'
                     logger.info(f"  👤 {spaces_info[sid]['name']} ({sid[:8]}) → {spaces_info[sid]['profile']} (local sidebar)")
@@ -855,17 +858,10 @@ class ArcPinnedTabExtractor:
                         logger.info(f"  🎨 Found icon for {space_name}: {icon}")
 
                     # Extract color
-                    window_theme = custom_info.get('windowTheme', {})
-                    if window_theme:
-                        primary_palette = window_theme.get('primaryColorPalette', {})
-                        if primary_palette:
-                            mid_tone = primary_palette.get('midTone', {})
-                            if mid_tone and 'red' in mid_tone and 'green' in mid_tone and 'blue' in mid_tone:
-                                r = max(0, min(1, mid_tone['red']))
-                                g = max(0, min(1, mid_tone['green']))
-                                b = max(0, min(1, mid_tone['blue']))
-                                color = {'r': r, 'g': g, 'b': b}
-                                logger.info(f"  🎨 Found color for {space_name}: RGB({r:.3f}, {g:.3f}, {b:.3f})")
+                    color = arc_space_color(custom_info.get('windowTheme'))
+                    if color:
+                        logger.info(f"  🎨 Found color for {space_name}: "
+                                    f"RGB({color['r']:.3f}, {color['g']:.3f}, {color['b']:.3f})")
 
                     logger.info(f"📍 Processing space: {space_name}")
 

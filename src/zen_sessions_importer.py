@@ -54,6 +54,23 @@ def write_mozlz4(file_path: Path, data: dict) -> None:
         f.write(compressed)
 
 
+def zen_gradient_colors(color: Optional[dict]) -> list:
+    """Zen workspace theme gradientColors for an Arc space color
+    ({'r', 'g', 'b'}, 0-1). Zen paints "c" as is; the other fields only place
+    the dot in Zen's color picker (same shape sync_arc_to_zen.py writes)."""
+    if not color:
+        return []
+    return [{
+        "c": [round(color[k] * 255) for k in ("r", "g", "b")],
+        "isCustom": False,
+        "algorithm": "floating",
+        "isPrimary": True,
+        "lightness": "60",
+        "position": {"x": 81, "y": 152},
+        "type": "explicit-lightness",
+    }]
+
+
 class ZenSessionsImporter:
     """Imports Arc spaces, pinned tabs, and folders into zen-sessions.jsonlz4."""
 
@@ -113,7 +130,7 @@ class ZenSessionsImporter:
             "name": space_data["space_name"],
             "theme": {
                 "type": "gradient",
-                "gradientColors": [],
+                "gradientColors": zen_gradient_colors(space_data.get("color")),
                 "opacity": 0.5,
                 "texture": 0,
             },
