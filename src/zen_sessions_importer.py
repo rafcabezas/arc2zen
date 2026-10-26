@@ -333,7 +333,8 @@ class ZenSessionsImporter:
         - Remove any previously migrated Arc spaces (matched by name) and all
           their tabs/folders — this clears stale UUIDs from old runs.
         - Also remove any orphaned tabs whose zenWorkspace UUID doesn't exist
-          in the remaining spaces array.
+          in the remaining spaces array. Zen's own Essentials have no
+          zenWorkspace and are kept.
         - Add the freshly built Arc spaces, tabs and folders.
         - Preserve all non-Arc spaces and their tabs/folders untouched.
         """
@@ -349,10 +350,14 @@ class ZenSessionsImporter:
             logger.info(f"  🧹 Replacing {len(removed_uuids)} previously migrated Arc space(s) with fresh data")
 
         # --- 2. Remove orphaned tabs (workspace UUID not in any kept space) ---
+        # Essentials the user added in Zen belong to no workspace, so keep them.
+        # Essentials this tool imports carry their Arc workspace's UUID, so a
+        # re-run still replaces those.
         kept_space_uuids = {s["uuid"] for s in kept_spaces}
         clean_tabs = [
             t for t in existing_tabs
             if t.get("zenWorkspace") in kept_space_uuids
+            or (t.get("zenEssential") and not t.get("zenWorkspace"))
         ]
         orphaned = len(existing_tabs) - len(clean_tabs)
         if orphaned:

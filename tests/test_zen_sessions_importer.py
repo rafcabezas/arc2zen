@@ -5,6 +5,7 @@ Covers every bug fixed in this PR:
   Bug 1 — Incomplete tab entry structure
   Bug 2 — _sync_sessionstore must not overwrite win["tabs"]
   Bug 3 — _merge_with_existing cleans stale spaces and orphaned tabs
+  Fix   — ... but keeps the Essentials the user added in Zen (no workspace)
   Bug 4 — container_mappings are applied (containerTabId + userContextId)
   Edge  — arc:// URLs are filtered out
   Edge  — root-level non-essential tabs are dropped by default
@@ -203,6 +204,27 @@ class TestMergeWithExisting:
         tab_urls = [t["entries"][0]["url"] if "entries" in t else t.get("url") for t in merged["tabs"]]
         assert "https://ghost.com" not in tab_urls, "Orphaned tab must be purged"
         assert "https://keeper.com" in tab_urls, "Valid tab must survive"
+
+    def test_zen_essentials_without_workspace_kept(self, importer):
+        """Essentials added in Zen have no zenWorkspace and must survive the cleanup."""
+        zen_essential = make_tab("https://calendar.example.com", "Calendar", None, is_essential=True)
+        old_arc_space = make_space("Work")
+        old_arc_essential = make_tab("https://mail.example.com", "Mail", old_arc_space["uuid"],
+                                     is_essential=True)
+        existing = {
+            "spaces": [old_arc_space],
+            "tabs": [zen_essential, old_arc_essential],
+            "folders": [],
+            "groups": [],
+            "splitViewData": [],
+        }
+
+        merged = importer._merge_with_existing(existing, [make_space("Work")], [], [], {"Work"})
+
+        tab_urls = [t["entries"][0]["url"] for t in merged["tabs"]]
+        assert "https://calendar.example.com" in tab_urls, "Zen's own Essential must be kept"
+        assert "https://mail.example.com" not in tab_urls, \
+            "Essentials from an earlier import must still be replaced"
 
     def test_non_arc_spaces_preserved(self, importer):
         """Manually created Zen spaces that are not Arc spaces must not be touched."""
