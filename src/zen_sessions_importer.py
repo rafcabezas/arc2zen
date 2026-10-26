@@ -108,7 +108,7 @@ class ZenSessionsImporter:
     # --- Build structures ---
 
     def _build_space(self, space_data: dict, container_id: int = 0) -> dict:
-        return {
+        space = {
             "uuid": self._generate_space_uuid(),
             "name": space_data["space_name"],
             "theme": {
@@ -120,6 +120,10 @@ class ZenSessionsImporter:
             "containerTabId": container_id,
             "hasCollapsedPinnedTabs": False,
         }
+        # The Arc space's emoji, as exported by the extractor; Zen shows it as the workspace icon
+        if space_data.get("icon"):
+            space["icon"] = space_data["icon"]
+        return space
 
     def _build_tab(self, tab_data: dict, workspace_uuid: str,
                    index: int, folder_id: Optional[str] = None,
