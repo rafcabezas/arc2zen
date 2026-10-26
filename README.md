@@ -245,6 +245,7 @@ Why a separate script: `ArcPinnedTabExtractor` gives each Arc profile's Favorite
 - `--dry-run` - Test migration without making changes
 - `--zen-profile NAME` - Specify target Zen profile name
 - `--arc-space NAME` - Migrate only a specific Arc space by name (case-insensitive partial matching). If not specified, all spaces are migrated.
+- `--container-per-profile` - Give all spaces of one Arc profile the same container (the first profile gets Work, the personal one Personal, any other profile its own), so each workspace shows its own profile's Favorites: Zen shows Essentials per container, Arc kept them per profile.
 - `--verbose` - Enable detailed debug logging
 - `--help` - Show all available options
 

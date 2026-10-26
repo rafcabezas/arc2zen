@@ -11,7 +11,7 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -206,13 +206,19 @@ class ZenSpaceImporter:
             logger.error(f"Failed to update prefs: {e}")
             return False
 
-    def import_arc_spaces_as_containers(self, arc_export_data: Dict, dry_run: bool = False) -> Dict[str, int]:
+    def import_arc_spaces_as_containers(self, arc_export_data: Dict, dry_run: bool = False,
+                                        per_profile: bool = False) -> Dict[str, int]:
         """Map Arc spaces to the built-in Work / Personal Firefox containers.
 
         All spaces from the work profile (Profile 1) are mapped to the
         built-in 'Work' container.  Spaces from the personal profile
         (Profile 2) are mapped to the built-in 'Personal' container.
         No new custom containers are created.
+
+        With per_profile=True, every space of one Arc profile shares a
+        container instead, since Arc keeps logins and Favorites per profile
+        and Zen shows Essentials per container (see _split_profiles). Profiles
+        beyond Work and Personal get a container of their own.
 
         Also removes any per-space containers created by previous migration
         runs (those whose name matches an Arc space name).
@@ -251,6 +257,10 @@ class ZenSpaceImporter:
             # is above 5 (which would only happen if it was created post-install,
             # consistent with a previous migration run).
             arc_names_lower = {s['space_name'].lower() for s in arc_spaces}
+            if per_profile:
+                work_profile, personal_profile, own_profiles = self._split_profiles(arc_spaces)
+                # Keep the containers an earlier per-profile run created, so they are reused
+                arc_names_lower -= {name.lower() for name in own_profiles.values()}
             before = len(container_config['identities'])
             container_config['identities'] = [
                 c for c in container_config['identities']
@@ -279,12 +289,6 @@ class ZenSpaceImporter:
                 logger.info("  🔧 Repaired containers.json lastUserContextId "
                             "(was Firefox's reserved internal id)")
 
-            if not dry_run:
-                self.save_containers(container_config)
-            else:
-                # Dry run: report what would be mapped, but write nothing
-                logger.info("🧪 DRY RUN - No actual changes will be made")
-
             # ── 3. Build the space → container mapping ───────────────────────
             # A space is mapped to the Personal container when ANY of these is true:
             #   a) Its name contains 'personal' (case-insensitive)  — most common
@@ -309,10 +313,23 @@ class ZenSpaceImporter:
                         pass
             last_profile = max(profile_numbers, key=profile_numbers.get) if profile_numbers else None
 
+            if per_profile:
+                profile_ids = {work_profile: work_id}
+                if personal_profile:
+                    profile_ids[personal_profile] = personal_id
+                for own_profile, name in own_profiles.items():
+                    profile_ids[own_profile] = self._get_or_create_container(container_config, name)
+
             container_mappings: Dict[str, int] = {}
             for space in arc_spaces:
                 space_name = space['space_name']
                 profile    = space.get('profile')
+
+                if per_profile:
+                    cid = profile_ids[profile or 'Default']
+                    container_mappings[space_name] = cid
+                    logger.info(f"  ✅ {space_name} (Arc profile: {profile!r}) → container ID {cid}")
+                    continue
 
                 is_personal = (
                     'personal' in space_name.lower()
@@ -335,17 +352,67 @@ class ZenSpaceImporter:
                 logger.info(f"  ✅ {space_name} (Arc profile: {profile!r}) → {label} (ID {cid})")
 
             if not dry_run:
+                self.save_containers(container_config)
                 self.update_prefs_for_workspaces()
                 self.create_workspaces_guide(container_mappings, arc_spaces)
                 logger.info(f"✅ Successfully mapped {len(container_mappings)} spaces")
                 return container_mappings
 
             # dry_run returns empty dict — no data written, caller must not use the result
+            logger.info("🧪 DRY RUN - No actual changes will be made")
             return {}
 
         except Exception as e:
             logger.error(f"Failed to map Arc spaces to containers: {e}")
             return {}
+
+    @staticmethod
+    def _split_profiles(arc_spaces: List) -> Tuple[str, Optional[str], Dict[str, str]]:
+        """Split Arc profiles into Work, Personal and the rest, for per_profile mode.
+
+        Work is the first profile ('Default', else the lowest 'Profile N').
+        Personal is another profile with a space named like 'personal', else
+        the highest-numbered one. Each remaining profile maps to the name of
+        its first space, which becomes its own container's name.
+        """
+        spaces_by_profile: Dict[str, List[str]] = {}
+        for space in arc_spaces:
+            spaces_by_profile.setdefault(space.get('profile') or 'Default', []).append(space['space_name'])
+
+        def number(profile: str) -> int:
+            last = profile.split()[-1]
+            return int(last) if last.isdigit() else 0
+
+        work, *others = sorted(spaces_by_profile, key=number)
+        personal = next((p for p in others
+                         if any('personal' in name.lower() for name in spaces_by_profile[p])),
+                        others[-1] if others else None)
+        own = {p: spaces_by_profile[p][0] for p in others if p != personal}
+        return work, personal, own
+
+    def _get_or_create_container(self, container_config: Dict, name: str) -> int:
+        """Return the id of the container called name, adding it if it doesn't exist."""
+        identities = container_config['identities']
+        for identity in identities:
+            if (identity.get('name') or '').lower() == name.lower():
+                logger.info(f"  📁 Using existing container: {name} -> {identity['userContextId']}")
+                return identity['userContextId']
+
+        used_icons = {c.get('icon') for c in identities}
+        used_colors = {c.get('color') for c in identities}
+        new_id = max([container_config.get('lastUserContextId', 0)] +
+                     [c['userContextId'] for c in identities
+                      if c['userContextId'] < MAX_USER_CONTEXT_ID]) + 1
+        identities.append({
+            "icon": next((i for i in self.CONTAINER_ICONS if i not in used_icons), "circle"),
+            "color": next((c for c in self.CONTAINER_COLORS if c not in used_colors), "purple"),
+            "public": True,
+            "userContextId": new_id,
+            "name": name,
+        })
+        container_config['lastUserContextId'] = new_id
+        logger.info(f"  ✅ Created container: {name} -> {new_id}")
+        return new_id
 
     def create_workspaces_guide(self, space_to_container: Dict[str, int], arc_spaces: List) -> None:
         """Create a guide file to help users set up workspaces."""

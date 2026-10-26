@@ -250,3 +250,54 @@ class TestContainerHeuristic:
         mappings = self._mappings_for(tmp_path, spaces)
         assert all(v == 2 for v in mappings.values()), \
             "Single-profile setup with no personal space — all should be Work"
+
+
+# ---------------------------------------------------------------------------
+# --container-per-profile — one container per Arc profile
+# ---------------------------------------------------------------------------
+
+class TestPerProfileContainers:
+    def _run(self, tmp_path, arc_spaces_data, create_file=True):
+        from zen_space_importer import ZenProfile, ZenSpaceImporter
+        if create_file:
+            _make_containers_file(tmp_path / "containers.json")
+            (tmp_path / "prefs.js").write_text("")
+        importer = ZenSpaceImporter(ZenProfile(name="Default", path=tmp_path))
+        return importer.import_arc_spaces_as_containers(
+            make_arc_export(arc_spaces_data), per_profile=True)
+
+    SPACES = [
+        # Arc's untitled default space is named after its id, which contains "Personal"
+        make_arc_space_data("Space thebrowser.company.defaultPersonalSpaceID", profile="Default"),
+        make_arc_space_data("Work",     profile="Default"),
+        make_arc_space_data("Personal", profile="Profile 2"),
+        make_arc_space_data("Social",   profile="Profile 2"),
+        make_arc_space_data("Side Project", profile="Profile 3"),
+    ]
+
+    def test_spaces_share_their_profiles_container(self, tmp_path):
+        mappings = self._run(tmp_path, self.SPACES)
+        assert mappings["Space thebrowser.company.defaultPersonalSpaceID"] == 2
+        assert mappings["Work"] == 2
+        assert mappings["Personal"] == 1
+        assert mappings["Social"] == 1, "Social shares the Personal space's Arc profile"
+        assert mappings["Side Project"] == 5, "A third profile gets a new container"
+        containers = _load_containers(tmp_path / "containers.json")
+        assert {"userContextId": 5, "name": "Side Project"}.items() <= containers["identities"][-1].items()
+        assert containers["lastUserContextId"] == 5
+
+    def test_rerun_reuses_profile_container(self, tmp_path):
+        self._run(tmp_path, self.SPACES)
+        mappings = self._run(tmp_path, self.SPACES, create_file=False)
+        assert mappings["Side Project"] == 5
+        containers = _load_containers(tmp_path / "containers.json")
+        assert [c.get("name") for c in containers["identities"]].count("Side Project") == 1
+        assert containers["lastUserContextId"] == 5
+
+    def test_highest_profile_is_personal_without_personal_space(self, tmp_path):
+        mappings = self._run(tmp_path, [
+            make_arc_space_data("Alpha", profile="Default"),
+            make_arc_space_data("Beta",  profile="Profile 2"),
+            make_arc_space_data("Gamma", profile="Profile 3"),
+        ])
+        assert mappings == {"Alpha": 2, "Gamma": 1, "Beta": 5}
