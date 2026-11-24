@@ -127,6 +127,7 @@ class Arc2ZenMigrator:
         import_history: bool = False,
         include_default_essentials: bool = False,
         drop_root_tabs: bool = False,
+        container_per_profile: bool = False,
     ) -> bool:
         """Run the complete Arc to Zen migration process."""
 
@@ -138,7 +139,8 @@ class Arc2ZenMigrator:
             f"Options: dry_run={dry_run}, zen_profile={zen_profile_name}, "
             f"arc_space={arc_space_name}, import_open_tabs={import_open_tabs}, "
             f"no_containers={no_containers}, import_history={import_history}, "
-            f"include_default_essentials={include_default_essentials}, drop_root_tabs={drop_root_tabs}"
+            f"include_default_essentials={include_default_essentials}, drop_root_tabs={drop_root_tabs}, "
+            f"container_per_profile={container_per_profile}"
         )
 
         # Clean up any previous export file to prevent caching issues
@@ -286,8 +288,13 @@ class Arc2ZenMigrator:
                 container_mappings[space_name] = 0  # No container
             space_success = True
         else:
-            print("  🔒 Creating separate containers for each Arc space (cookie isolation)")
-            container_mappings = zen_space_importer.import_arc_spaces_as_containers(arc_export_data, dry_run=dry_run)
+            if container_per_profile:
+                print("  🔒 One container per Arc profile (its spaces share logins and Favorites)")
+            else:
+                print("  🔒 Creating separate containers for each Arc space (cookie isolation)")
+            container_mappings = zen_space_importer.import_arc_spaces_as_containers(
+                arc_export_data, dry_run=dry_run, per_profile=container_per_profile
+            )
 
             # In dry run, container_mappings will be empty, but that's expected
             if dry_run:
@@ -489,6 +496,15 @@ Examples:
     )
 
     parser.add_argument(
+        '--container-per-profile',
+        action='store_true',
+        default=False,
+        help='Give all spaces of one Arc profile the same container, like Arc keeps logins and '
+             'Favorites per profile (Zen shows Essentials per container). The first profile gets '
+             'Work, the personal one gets Personal, any other profile gets its own container.'
+    )
+
+    parser.add_argument(
         '--include-default-essentials',
         action='store_true',
         default=False,
@@ -522,6 +538,7 @@ Examples:
             import_history=args.history,
             include_default_essentials=args.include_default_essentials,
             drop_root_tabs=args.drop_root_tabs,
+            container_per_profile=args.container_per_profile,
         )
 
         if success and not args.dry_run:
