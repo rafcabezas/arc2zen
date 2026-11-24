@@ -65,6 +65,10 @@ def write_mozlz4(path, data):
 
 def is_zen_running():
     try:
+        if os.name == 'nt':
+            r = subprocess.run(['tasklist', '/FI', 'IMAGENAME eq zen.exe', '/NH'],
+                               capture_output=True, text=True)
+            return 'zen.exe' in r.stdout.lower()
         r = subprocess.run(['pgrep', '-f', '/Applications/Zen.app/Contents/MacOS'],
                            capture_output=True, text=True)
         return r.returncode == 0 and bool(r.stdout.strip())
@@ -74,7 +78,10 @@ def is_zen_running():
 
 def find_zen_profile():
     import glob
-    base = os.path.expanduser('~/Library/Application Support/zen/Profiles')
+    if os.name == 'nt':
+        base = os.path.join(os.environ.get('APPDATA', ''), 'zen', 'Profiles')
+    else:
+        base = os.path.expanduser('~/Library/Application Support/zen/Profiles')
     matches = glob.glob(os.path.join(base, '*', 'zen-sessions.jsonlz4'))
     if not matches:
         matches = glob.glob(os.path.join(base, '*', 'places.sqlite'))
