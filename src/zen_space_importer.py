@@ -179,11 +179,12 @@ class ZenSpaceImporter:
                 with open(self.prefs_file, 'r') as f:
                     prefs_content = f.read()
 
-            # Ensure workspace preferences are set
+            # Ensure workspace preferences are set. zen.workspaces.hide-default-container-indicator
+            # stays at Zen's default (true): false puts a container-colored bar on every tab
+            # that is in its own workspace's container.
             workspace_prefs = [
                 'user_pref("zen.workspaces.continue-where-left-off", true);',
                 'user_pref("zen.workspaces.force-container-workspace", true);',
-                'user_pref("zen.workspaces.hide-default-container-indicator", false);',
             ]
 
             if active_workspace_id:

@@ -6,6 +6,7 @@ Covers:
   Fix    — Stale per-space containers cleaned from containers.json on re-run
   Fix    — Cleanup never moves lastUserContextId onto Firefox's reserved id
   Fix    — Smart container heuristic (name + profile-order fallback)
+  Fix    — zen.workspaces.hide-default-container-indicator stays at Zen's default
 """
 import json
 import sys
@@ -106,6 +107,15 @@ class TestContainerMapping:
         assert mappings == {}, "dry_run must return empty dict"
         assert (tmp_path / "containers.json").stat().st_mtime == original_mtime, \
             "containers.json must not be modified in dry_run"
+
+    def test_container_indicator_left_at_zen_default(self, space_importer, tmp_path):
+        """By default Zen hides the container bar on tabs in their own workspace's
+        container; the import must not turn that off."""
+        space_importer.import_arc_spaces_as_containers(
+            make_arc_export([make_arc_space_data("Workspace")]))
+        prefs = (tmp_path / "prefs.js").read_text()
+        assert "zen.workspaces.force-container-workspace" in prefs, "prefs.js must be written"
+        assert "hide-default-container-indicator" not in prefs
 
 
 # ---------------------------------------------------------------------------
