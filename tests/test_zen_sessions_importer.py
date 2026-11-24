@@ -6,6 +6,7 @@ Covers every bug fixed in this PR:
   Bug 2 — _sync_sessionstore must not overwrite win["tabs"]
   Bug 3 — _merge_with_existing cleans stale spaces and orphaned tabs
   Bug 4 — container_mappings are applied (containerTabId + userContextId)
+  Fix   — the Arc space's emoji becomes the Zen workspace icon
   Edge  — arc:// URLs are filtered out
   Edge  — root-level non-essential tabs are dropped by default
 """
@@ -283,6 +284,26 @@ class TestContainerPropagation:
         assert space_by_name["Personal"]["containerTabId"] == 1
         assert tab_by_url["https://asana.com"]["userContextId"] == 2
         assert tab_by_url["https://gmail.com"]["userContextId"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Fix — the Arc space's emoji becomes the Zen workspace icon
+# ---------------------------------------------------------------------------
+
+class TestSpaceIcon:
+    def test_arc_emoji_becomes_workspace_icon(self, importer):
+        space = importer._build_space({"space_name": "Work", "icon": "🏢"})
+        assert space["icon"] == "🏢"
+
+    def test_no_icon_without_arc_icon(self, importer):
+        space = importer._build_space({"space_name": "Work", "icon": None})
+        assert "icon" not in space
+
+    def test_icon_flows_through_import(self, importer, empty_sessions):
+        export = make_arc_export([dict(make_arc_space_data("Work"), icon="🏢")])
+        importer.import_arc_data(export, {"Work": 0})
+        spaces = read_mozlz4(importer.sessions_file)["spaces"]
+        assert [s.get("icon") for s in spaces if s["name"] == "Work"] == ["🏢"]
 
 
 # ---------------------------------------------------------------------------
